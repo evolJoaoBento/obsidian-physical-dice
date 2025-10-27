@@ -1,0 +1,34 @@
+import { Modal, App } from 'obsidian';
+import D20DicePlugin from './main';
+export declare class DiceChatModal extends Modal {
+    private plugin;
+    private apiClient;
+    private chatContainer;
+    private messageInput;
+    private diceSelectionContainer;
+    private expressionDisplay;
+    private rollButton;
+    private diceExpression;
+    private diceCounts;
+    private modifier;
+    private userRole;
+    private username;
+    private isPolling;
+    private pollTimeout;
+    private lastMessageId;
+    constructor(app: App, plugin: D20DicePlugin);
+    onOpen(): Promise<void>;
+    private showUserSetup;
+    private setupChatInterface;
+    private updateDiceDisplay;
+    private clearDice;
+    private sendChatMessage;
+    private sendDiceRequest;
+    private rollDice;
+    private loadMessages;
+    private displayMessages;
+    private populateDiceFromRequest;
+    private startPolling;
+    private stopPolling;
+    onClose(): void;
+}

@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="800" height="600" fill="#f8f9fa"/>
+
+  <!-- Title -->
+  <text x="400" y="30" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="bold" fill="#2c3e50">
+    D20 Icosahedron Texture Tiling Guide
+  </text>
+
+  <!-- Subtitle -->
+  <text x="400" y="55" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#7f8c8d">
+    Create textures that will tile properly on your D20 dice faces
+  </text>
+
+  <!-- Main explanation -->
+  <text x="50" y="90" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#34495e">
+    How D20 Texture Mapping Works:
+  </text>
+
+  <text x="50" y="115" font-family="Arial, sans-serif" font-size="14" fill="#2c3e50">
+    • Your image will be stretched and repeated across all 20 triangular faces
+  </text>
+  <text x="50" y="135" font-family="Arial, sans-serif" font-size="14" fill="#2c3e50">
+    • Each face gets the full image, scaled to fit the triangle
+  </text>
+  <text x="50" y="155" font-family="Arial, sans-serif" font-size="14" fill="#2c3e50">
+    • Best results: Use square images with centered designs
+  </text>
+
+  <!-- Visual example with a sample texture -->
+  <g transform="translate(50, 180)">
+    <text x="0" y="0" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#34495e">
+      Example Texture Design:
+    </text>
+
+    <!-- Sample texture square -->
+    <rect x="0" y="20" width="120" height="120" fill="#3498db" stroke="#2c3e50" stroke-width="2"/>
+    <circle cx="60" cy="80" r="25" fill="#e74c3c"/>
+    <text x="60" y="85" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="white">20</text>
+
+    <text x="0" y="160" font-family="Arial, sans-serif" font-size="12" fill="#7f8c8d">
+      Sample 120x120px texture
+    </text>
+
+    <!-- Arrow -->
+    <path d="M 140 80 L 180 80" stroke="#34495e" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+    <!-- How it appears on faces -->
+    <g transform="translate(200, 20)">
+      <text x="0" y="0" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#34495e">
+        How it appears on D20 faces:
+      </text>
+
+      <!-- Triangle faces showing the texture -->
+      <g transform="translate(0, 20)">
+        <!-- Face 1 -->
+        <polygon points="0,0 30,52 60,0" fill="#3498db" stroke="#2c3e50" stroke-width="1"/>
+        <circle cx="30" cy="25" r="8" fill="#e74c3c"/>
+        <text x="30" y="28" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="white">20</text>
+
+        <!-- Face 2 -->
+        <polygon points="80,0 110,52 140,0" fill="#3498db" stroke="#2c3e50" stroke-width="1"/>
+        <circle cx="110" cy="25" r="8" fill="#e74c3c"/>
+        <text x="110" y="28" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="white">20</text>
+
+        <!-- Face 3 -->
+        <polygon points="40,60 70,112 100,60" fill="#3498db" stroke="#2c3e50" stroke-width="1"/>
+        <circle cx="70" cy="85" r="8" fill="#e74c3c"/>
+        <text x="70" y="88" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="white">20</text>
+      </g>
+
+      <text x="0" y="140" font-family="Arial, sans-serif" font-size="12" fill="#7f8c8d">
+        Each triangular face gets the full image
+      </text>
+    </g>
+  </g>
+
+  <!-- Design recommendations -->
+  <g transform="translate(50, 380)">
+    <text x="0" y="0" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#34495e">
+      Design Recommendations:
+    </text>
+
+    <rect x="0" y="20" width="700" height="140" fill="#ecf0f1" stroke="#bdc3c7" stroke-width="1" rx="5"/>
+
+    <text x="20" y="45" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#27ae60">
+      ✓ Good Texture Designs:
+    </text>
+    <text x="40" y="65" font-family="Arial, sans-serif" font-size="12" fill="#2c3e50">
+      • Centered symbols, logos, or patterns
+    </text>
+    <text x="40" y="80" font-family="Arial, sans-serif" font-size="12" fill="#2c3e50">
+      • High contrast colors for visibility
+    </text>
+    <text x="40" y="95" font-family="Arial, sans-serif" font-size="12" fill="#2c3e50">
+      • Square aspect ratio images (512x512, 256x256, etc.)
+    </text>
+
+    <text x="400" y="45" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#e74c3c">
+      ✗ Avoid:
+    </text>
+    <text x="420" y="65" font-family="Arial, sans-serif" font-size="12" fill="#2c3e50">
+      • Text or numbers (will appear on every face)
+    </text>
+    <text x="420" y="80" font-family="Arial, sans-serif" font-size="12" fill="#2c3e50">
+      • Very detailed images (may not be visible)
+    </text>
+    <text x="420" y="95" font-family="Arial, sans-serif" font-size="12" fill="#2c3e50">
+      • Rectangular images (will be distorted)
+    </text>
+
+    <text x="20" y="125" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#8e44ad">
+      Tip: Your texture will repeat on all 20 faces, so choose designs that look good when repeated!
+    </text>
+  </g>
+
+  <!-- File format info -->
+  <text x="50" y="560" font-family="Arial, sans-serif" font-size="12" fill="#7f8c8d">
+    Supported formats: PNG, JPG, GIF, WEBP | Max file size: 5MB | Recommended size: 256x256 to 512x512 pixels
+  </text>
+
+  <!-- Arrow marker definition -->
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7"
+     refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#34495e"/>
+    </marker>
+  </defs>
+</svg>

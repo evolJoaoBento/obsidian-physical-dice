@@ -1,0 +1,449 @@
+.dice-roller-view {
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+    background: var(--background-primary);
+}
+
+.dice-header h2 {
+    text-align: center;
+    margin: 0;
+    color: var(--text-normal);
+}
+
+.dice-container-large {
+    position: relative;
+    width: 600px;
+    height: 450px;
+    border: 2px solid var(--background-modifier-border);
+    border-radius: 8px;
+    background: var(--background-secondary);
+    overflow: hidden;
+}
+
+.dice-container-large canvas {
+    border-radius: 6px;
+    display: block;
+}
+
+.dice-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none; /* Overlay itself is click-through */
+    z-index: 10;
+}
+
+.dice-controls-overlay {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 10px;
+    pointer-events: auto; /* Buttons are clickable */
+}
+
+.dice-result-overlay {
+    position: absolute;
+    bottom: 70px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 24px;
+    font-weight: bold;
+    text-align: center;
+    padding: 15px;
+    border-radius: 8px;
+    min-height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.3s ease;
+    opacity: 0;
+    transform: translateX(-50%) scale(0.9);
+    pointer-events: auto;
+}
+
+.dice-result-overlay.show {
+    opacity: 1;
+    transform: translateX(-50%) scale(1);
+    background: var(--background-secondary);
+    color: var(--text-normal);
+    border: 2px solid var(--interactive-accent);
+    box-shadow: 0 2px 8px var(--shadow-color);
+}
+
+.dice-result-overlay.show:hover {
+    background: var(--background-modifier-hover);
+    border-color: var(--interactive-accent-hover);
+}
+
+.dice-result-overlay.error {
+    opacity: 1;
+    transform: translateX(-50%) scale(1);
+    background: var(--background-modifier-error);
+    color: var(--text-error);
+    border: 2px solid var(--text-error);
+}
+
+.dice-roll-button {
+    padding: 10px 20px;
+    font-size: 16px;
+    font-weight: bold;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.dice-roll-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Floating overlay styles */
+.dice-floating-overlay {
+    position: fixed;
+    pointer-events: none; /* Make overlay click-through */
+    z-index: 999;
+    overflow: visible; /* Allow controls to be dragged anywhere */
+    background: transparent;
+}
+
+.dice-floating-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none; /* Container is click-through */
+    background: transparent;
+    overflow: hidden;
+}
+
+.dice-floating-container canvas {
+    pointer-events: auto; /* Always capture events for dice detection */
+    background: transparent !important;
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    display: block !important;
+    border: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-sizing: border-box !important;
+    cursor: default !important;
+}
+
+.dice-floating-container canvas.dice-clickthrough {
+    pointer-events: none !important; /* Allow click-through when not hovering dice */
+}
+
+.dice-floating-container canvas.dice-interactive {
+    cursor: grab !important; /* Show grab cursor when over dice */
+}
+
+/* Draggable controls panel */
+.dice-controls-panel {
+    position: fixed;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    padding: 12px;
+    box-shadow: 0 4px 16px var(--shadow-color);
+    pointer-events: auto;
+    z-index: 1000;
+    min-width: 120px;
+}
+
+.dice-controls-drag-handle {
+    text-align: center;
+    color: var(--text-muted);
+    cursor: grab;
+    font-size: 12px;
+    padding: 4px;
+    user-select: none;
+    border-bottom: 1px solid var(--background-modifier-border);
+    margin-bottom: 4px;
+}
+
+.dice-controls-drag-handle:hover {
+    color: var(--text-normal);
+}
+
+.dice-controls-panel .dice-roll-button {
+    width: 100%;
+    padding: 8px 12px;
+    font-size: 14px;
+    margin: 0;
+}
+
+.dice-controls-panel .dice-result-overlay {
+    position: static;
+    transform: none;
+    background: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    padding: 8px;
+    text-align: center;
+    font-size: 16px;
+    min-height: 24px;
+    opacity: 1;
+    transition: all 0.3s ease;
+}
+
+.dice-controls-panel .dice-result-overlay.show {
+    background: var(--background-modifier-success);
+    border-color: var(--interactive-accent);
+}
+
+.dice-controls-panel .dice-result-overlay.show:hover {
+    background: var(--background-modifier-hover);
+}
+
+.dice-controls-panel .dice-floating-close-btn {
+    position: static;
+    width: 100%;
+    height: 32px;
+    border-radius: 4px;
+    background: var(--background-modifier-error);
+    border: 1px solid var(--background-modifier-border);
+    color: var(--text-normal);
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+}
+
+.dice-controls-panel .dice-floating-close-btn:hover {
+    background: var(--background-modifier-error-hover);
+    transform: none;
+}
+
+/* Dice Chat Modal Styles */
+.dice-chat-modal .modal {
+    min-height: 500px;
+}
+
+.dice-chat-modal .modal-content {
+    padding: 0;
+    height: 100%;
+}
+
+.dice-chat-header {
+    background: var(--background-secondary);
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.dice-chat-close {
+    color: var(--text-muted);
+    transition: color 0.2s ease;
+}
+
+.dice-chat-close:hover {
+    color: var(--text-normal);
+}
+
+.dice-chat-messages {
+    background: var(--background-primary);
+    border-radius: 5px;
+    font-size: 13px;
+}
+
+.dice-chat-message {
+    word-wrap: break-word;
+}
+
+.dice-request-message {
+    transition: background-color 0.2s ease;
+}
+
+.dice-request-message:hover {
+    background: var(--background-modifier-hover) !important;
+}
+
+.dice-result-message {
+    border-radius: 5px;
+}
+
+.message-header {
+    font-size: 12px;
+}
+
+.message-content {
+    line-height: 1.4;
+}
+
+.message-timestamp {
+    text-align: right;
+}
+
+.dice-chat-input-container input {
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 5px;
+    background: var(--background-primary);
+    color: var(--text-normal);
+}
+
+.dice-chat-input-container input:focus {
+    border-color: var(--interactive-accent);
+    outline: none;
+}
+
+.dice-expression-display {
+    min-height: 20px;
+    line-height: 1.4;
+}
+
+.dice-selection-grid {
+    margin-bottom: 15px;
+}
+
+.dice-card {
+    background: var(--background-primary);
+    transition: background-color 0.2s ease;
+}
+
+.dice-card:hover {
+    background: var(--background-modifier-hover);
+}
+
+.dice-type-label {
+    font-weight: bold;
+    font-size: 12px;
+    color: var(--text-accent);
+    margin-bottom: 5px;
+}
+
+.dice-count-display {
+    color: var(--text-normal);
+}
+
+.dice-card button {
+    background: var(--interactive-normal);
+    color: var(--text-on-accent);
+    border: 1px solid var(--interactive-accent);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.dice-card button:hover {
+    background: var(--interactive-hover);
+    transform: scale(1.05);
+}
+
+.dice-card button:active {
+    transform: scale(0.95);
+}
+
+.dice-modifier input {
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 3px;
+    background: var(--background-primary);
+    color: var(--text-normal);
+    text-align: center;
+}
+
+.dice-modifier input:focus {
+    border-color: var(--interactive-accent);
+    outline: none;
+}
+
+.dice-actions button {
+    padding: 10px;
+    border-radius: 5px;
+    border: 1px solid var(--background-modifier-border);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-weight: 500;
+}
+
+.dice-chat-modal .dice-roll-button {
+    background: var(--interactive-accent) !important;
+    color: white !important;
+    border-color: var(--interactive-accent) !important;
+}
+
+.dice-chat-modal .dice-roll-button:hover:not(:disabled) {
+    background: var(--interactive-accent-hover) !important;
+}
+
+.dice-chat-modal .dice-roll-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.dice-request-button {
+    background: var(--color-orange);
+    color: white;
+    border-color: var(--color-orange);
+}
+
+.dice-request-button:hover {
+    background: var(--color-orange);
+    opacity: 0.8;
+}
+
+.dice-clear-button {
+    background: var(--background-primary);
+    color: var(--text-normal);
+}
+
+.dice-clear-button:hover {
+    background: var(--background-modifier-hover);
+}
+
+.dice-chat-buttons {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+}
+
+/* Responsive adjustments */
+@media (max-width: 600px) {
+    .dice-chat-modal .modal {
+        width: 95vw;
+        height: 95vh;
+    }
+
+    .dice-chat-main {
+        flex-direction: column !important;
+    }
+
+    .dice-dice-section {
+        width: 100% !important;
+        margin-top: 15px;
+    }
+
+    .dice-selection-grid {
+        grid-template-columns: repeat(3, 1fr) !important;
+    }
+}
+
+/* Dark theme adjustments */
+.theme-dark .dice-request-message {
+    border-color: var(--interactive-accent) !important;
+}
+
+.theme-dark .dice-result-message {
+    border-left-color: var(--color-green) !important;
+}
+
+/* Light theme adjustments */
+.theme-light .dice-request-message {
+    border-color: var(--interactive-accent) !important;
+}
+
+.theme-light .dice-result-message {
+    border-left-color: var(--color-green) !important;
+}
+
