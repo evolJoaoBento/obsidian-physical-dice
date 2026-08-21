@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from 'obsidian';
+import { App, PluginSettingTab, Setting, Notice } from 'obsidian';
 import D20DicePlugin from './main';
 
 export interface DiceSettings {
@@ -51,9 +51,6 @@ export interface DiceSettings {
 
     // Shadow settings
     enableShadows: boolean;
-    diceCastShadow: boolean;
-    diceReceiveShadow: boolean;
-    surfaceReceiveShadow: boolean;
 
     // Lighting settings
     ambientLightIntensity: number;
@@ -157,10 +154,7 @@ export const DEFAULT_SETTINGS: DiceSettings = {
     diceOpacity: 1.0,
 
     // Shadow defaults
-    enableShadows: false,
-    diceCastShadow: true,
-    diceReceiveShadow: false,
-    surfaceReceiveShadow: true,
+    enableShadows: true,
 
     // Lighting defaults
     ambientLightIntensity: 1.2,
@@ -517,45 +511,12 @@ export class DiceSettingTab extends PluginSettingTab {
         const shadowSection = this.createCollapsibleSection(containerEl, 'Shadow Settings', 'shadows');
 
         new Setting(shadowSection)
-            .setName('Enable shadows')
-            .setDesc('Enable realistic shadow rendering (may impact performance)')
+            .setName('Dice shadows')
+            .setDesc('Draw a soft shadow under each die, shaped like the die itself')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.enableShadows)
                 .onChange(async (value) => {
                     this.plugin.settings.enableShadows = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(shadowSection)
-            .setName('Dice cast shadows')
-            .setDesc('Allow dice to cast shadows on surfaces')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.diceCastShadow)
-                .onChange(async (value) => {
-                    this.plugin.settings.diceCastShadow = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(shadowSection)
-            .setName('Dice receive shadows')
-            .setDesc('Allow shadows to be cast on dice surfaces')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.diceReceiveShadow)
-                .onChange(async (value) => {
-                    this.plugin.settings.diceReceiveShadow = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(shadowSection)
-            .setName('Surface receive shadows')
-            .setDesc('Allow shadows to be cast on the dice tray surface')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.surfaceReceiveShadow)
-                .onChange(async (value) => {
-                    this.plugin.settings.surfaceReceiveShadow = value;
                     await this.plugin.saveSettings();
                     this.plugin.refreshDiceView();
                 }));
@@ -688,7 +649,7 @@ export class DiceSettingTab extends PluginSettingTab {
                                 if (file) {
                                     // Check file size (limit to 5MB to prevent memory issues)
                                     if (file.size > 5 * 1024 * 1024) {
-                                        alert('Image file too large. Please use an image smaller than 5MB.');
+                                        new Notice('Image file too large. Please use an image smaller than 5MB.');
                                         return;
                                     }
 
@@ -696,7 +657,7 @@ export class DiceSettingTab extends PluginSettingTab {
                                     reader.onload = async (event) => {
                                         const base64 = event.target?.result as string;
                                         (this.plugin.settings.diceTextures as any)[dice.key] = base64;
-                                        await this.plugin.saveSettings();
+                                        await this.plugin.saveTextures();
                                         this.plugin.refreshDiceView();
                                         this.display(); // Refresh to update checkmarks
                                     };
@@ -710,7 +671,7 @@ export class DiceSettingTab extends PluginSettingTab {
                             .setDisabled(!hasTexture)
                             .onClick(async () => {
                                 (this.plugin.settings.diceTextures as any)[dice.key] = '';
-                                await this.plugin.saveSettings();
+                                await this.plugin.saveTextures();
                                 this.plugin.refreshDiceView();
                                 this.display(); // Refresh to update checkmarks
                             });
@@ -749,7 +710,7 @@ export class DiceSettingTab extends PluginSettingTab {
                             if (file) {
                                 // Check file size (limit to 5MB to prevent memory issues)
                                 if (file.size > 5 * 1024 * 1024) {
-                                    alert('Normal map file too large. Please use an image smaller than 5MB.');
+                                    new Notice('Normal map file too large. Please use an image smaller than 5MB.');
                                     return;
                                 }
 
@@ -757,7 +718,7 @@ export class DiceSettingTab extends PluginSettingTab {
                                 reader.onload = async (event) => {
                                     const base64 = event.target?.result as string;
                                     (this.plugin.settings.diceNormalMaps as any)[dice.key] = base64;
-                                    await this.plugin.saveSettings();
+                                    await this.plugin.saveTextures();
                                     this.plugin.refreshDiceView();
                                     this.display(); // Refresh to update checkmarks
                                 };
@@ -771,7 +732,7 @@ export class DiceSettingTab extends PluginSettingTab {
                         .setDisabled(!hasNormalMap)
                         .onClick(async () => {
                             (this.plugin.settings.diceNormalMaps as any)[dice.key] = '';
-                            await this.plugin.saveSettings();
+                            await this.plugin.saveTextures();
                             this.plugin.refreshDiceView();
                             this.display(); // Refresh to update checkmarks
                         });

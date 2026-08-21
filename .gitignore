@@ -3,3 +3,21 @@ node_modules/
 .DS_Store
 data.json
 dsix alt/
+
+# tsc with outDir "./" drops these next to the sources; Obsidian only ever
+# loads main.js, manifest.json and styles.css.
+*.d.ts
+!obsidian.d.ts
+api-client.js
+chat-modal.js
+chat-view.js
+d20-dice.js
+dice-view.js
+settings.js
+textures.json
+
+# harness bundle
+harness/harness.js
+
+# Obsidian's own stylesheet, extracted locally for the harness
+harness/obsidian-app.css

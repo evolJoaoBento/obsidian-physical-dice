@@ -9,8 +9,8 @@
     "noImplicitAny": false,
     "moduleResolution": "node",
     "importHelpers": true,
-    "declaration": true,
-    "outDir": "./",
+    "declaration": false,
+    "noEmit": true,
     "typeRoots": [
       "node_modules/@types"
     ],

@@ -37,6 +37,8 @@ const context = await esbuild.context({
 	logLevel: "info",
 	sourcemap: prod ? false : "inline",
 	treeShaking: true,
+	// main.js is parsed on every vault open; unminified it is over a megabyte.
+	minify: prod,
 	outfile: "main.js",
 });
 

@@ -2,6 +2,58 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { DiceSettings } from './settings';
 
+/** Flip to true to get the roll and face-detection trace back on the console. */
+const DEBUG = false;
+const log = (...args: unknown[]): void => { if (DEBUG) console.log(...args); };
+
+const UP = new THREE.Vector3(0, 1, 0);
+const DOWN = new THREE.Vector3(0, -1, 0);
+
+/**
+ * Real shadows, cast onto the page.
+ *
+ * The dice sit on a transparent canvas over a note, so there is normally
+ * nothing in the scene for a shadow to land on — which is why the plugin's
+ * original shadow settings produced nothing at all whenever the tray surface
+ * was hidden. A THREE.ShadowMaterial solves it: a plane wearing one is
+ * completely invisible except where something shadows it, so the shadow appears
+ * to fall directly on whatever is behind the canvas.
+ */
+
+/** How dark a fully shadowed pixel gets. */
+const SHADOW_OPACITY = 0.38;
+
+/**
+ * Shadow map resolution. The map covers the whole tray, so this is the whole
+ * budget, and 1024 over this tray keeps a d20 silhouette readable.
+ */
+const SHADOW_MAP_SIZE = 1024;
+
+
+/**
+ * Depth bias. The light is nearly overhead and the receiver is a flat plane, so
+ * a small constant bias plus a normal-facing one is enough to keep contact
+ * shadows tight without detaching them from the die.
+ */
+const SHADOW_BIAS = -0.0004;
+const SHADOW_NORMAL_BIAS = 0.02;
+
+/**
+ * How far the shadow-casting light leans over, as horizontal distance per unit
+ * of height. The camera looks straight down, so a light directly overhead puts
+ * every shadow underneath the die that casts it, where it cannot be seen at
+ * all. Leaning the light over slides the shadow out into view.
+ *
+ * 0.55 puts the shadow of a die roughly half its own height to one side.
+ */
+const SHADOW_LEAN = 0.55;
+
+/** Azimuth used when the scene light is exactly overhead and gives no hint. */
+const SHADOW_DEFAULT_AZIMUTH = { x: 0.85, z: 0.53 };
+
+/** The tray box is 0.8 tall and centred at y = -2, so its visible top is here. */
+const TRAY_TOP_Y = -1.6;
+
 export class D20Dice {
     private scene: THREE.Scene;
     private camera: THREE.OrthographicCamera;
@@ -31,6 +83,16 @@ export class D20Dice {
     private selectedDice: THREE.Mesh[] = [];
     private draggedDiceIndex = -1;
     private trayMesh: THREE.Mesh | null = null;
+    private trayBorder: THREE.LineSegments | null = null;
+    private trayBodies: CANNON.Body[] = [];
+    /**
+     * Invisible plane that catches the dice's shadows. Wearing a ShadowMaterial
+     * it draws nothing but the shadow itself, so the canvas stays transparent.
+     */
+    private shadowCatcher: THREE.Mesh | null = null;
+    /** World Y the shadows land on: the visible tray top, or the physics floor. */
+    private shadowPlaneY = -2.38;
+    private isTearingDown = false;
     private windowBorder: HTMLElement | null = null;
     private hoverCircle: THREE.Mesh | null = null;
     private hoverCircleMaterial: THREE.MeshBasicMaterial | null = null;
@@ -39,12 +101,43 @@ export class D20Dice {
     public onRollComplete: ((result: number | string) => void) | null = null;
     private ambientLight: THREE.AmbientLight | null = null;
     private directionalLight: THREE.DirectionalLight | null = null;
+    /**
+     * Casts the shadows and lights nothing. See setupLighting() for why it is a
+     * second light rather than the one the user configures.
+     */
+    private shadowLight: THREE.DirectionalLight | null = null;
     public isViewActive: boolean = true; // Track if the view is active
+
+    // Render loop state. The loop stops itself once nothing is moving; every
+    // mutation that changes the picture has to call wake() to restart it.
+    private needsRender = true;
+    private lastFrameTime = 0;
+    private lastDragRender = 0;
+    private readonly animateBound = () => this.animate();
+    // getBoundingClientRect() flushes layout, so it is read once per resize
+    // rather than once per pointer event.
+    private cachedRect: DOMRect | null = null;
+    private currentCursor = '';
+    private readonly pickVec = new THREE.Vector3();
+
+    // The convex hull is identical for every die of a given type and size, and
+    // building one throws away a whole BufferGeometry. Build each one once.
+    private static shapeCache = new Map<string, CANNON.Shape>();
+    private static faceNormalCache = new Map<string, THREE.Vector3[]>();
+    private readonly normalScratch = new THREE.Vector3();
+    // Instance-scoped on purpose: destroy() disposes textures through the
+    // meshes that reference them, so a cache outliving the renderer would hand
+    // out disposed handles to the next overlay.
+    private readonly textureCache = new Map<string, THREE.Texture>();
+    // cannon only consults a Material through a ContactMaterial pair; with none
+    // registered every body falls back to world.defaultContactMaterial anyway,
+    // so one shared instance behaves identically to one per body.
+    private static readonly bodyMaterial = new CANNON.Material({ friction: 0.4, restitution: 0.3 });
 
     constructor(container: HTMLElement, settings: DiceSettings) {
         this.container = container;
         this.settings = settings;
-        console.log('🎲 D20Dice initialized with settings:', {
+        log('🎲 D20Dice initialized with settings:', {
             motionThreshold: settings.motionThreshold,
             enableResultAnimation: settings.enableResultAnimation,
             diceSize: settings.diceSize
@@ -75,21 +168,25 @@ export class D20Dice {
                 antialias: true,
                 alpha: true,
                 preserveDrawingBuffer: false,
-                powerPreference: "high-performance"
+                powerPreference: "high-performance",
+                // Flat-shaded solids plus one texture — highp buys nothing here.
+                precision: "mediump"
             });
-            // Configure shadow mapping based on settings
+            // Shadows land on the shadow catcher; see createShadowCatcher().
             this.renderer.shadowMap.enabled = this.settings.enableShadows;
-            this.renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Soft shadows for better quality
+            this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
             // Add WebGL context loss/restore handlers
             const canvas = this.renderer.domElement;
             canvas.addEventListener('webglcontextlost', (event) => {
-                console.warn('WebGL context lost, attempting to prevent default');
+                if (!this.isTearingDown) {
+                    console.warn('WebGL context lost, attempting to prevent default');
+                }
                 event.preventDefault();
             });
 
             canvas.addEventListener('webglcontextrestored', () => {
-                console.log('WebGL context restored, reinitializing scene');
+                log('WebGL context restored, reinitializing scene');
                 this.reinitializeAfterContextLoss();
             });
 
@@ -111,27 +208,57 @@ export class D20Dice {
             this.createDiceTray();
             this.setupLighting();
 
-            this.animate();
+            // wake() rather than animate(): setInitialSize() has already queued
+            // a frame, and calling animate() directly here would leave two
+            // independent loops stepping the same world.
+            this.wake();
         } catch (error) {
             console.error('Failed to initialize D20 dice:', error);
             console.error('Error details:', error.message, error.stack);
-            this.container.innerHTML = `<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted);">3D rendering not available<br><small>Error: ${error.message}</small></div>`;
+            this.container.empty();
+            const fallback = this.container.createDiv({ cls: 'dice-render-error' });
+            fallback.createSpan({ text: '3D rendering not available' });
+            fallback.createEl('small', { text: `Error: ${error.message}` });
         }
     }
 
     private initPhysics() {
         this.world = new CANNON.World();
         this.world.gravity.set(0, -9.82, 0); // Realistic Earth gravity (9.82 m/s²)
-        console.log(`🌍 Physics world initialized with gravity: ${this.world.gravity.y}`);
+        log(`🌍 Physics world initialized with gravity: ${this.world.gravity.y}`);
+
+        // Body.allowSleep defaults to true and every die sets sleepSpeedLimit /
+        // sleepTimeLimit, but World.allowSleep is false unless asked — without
+        // this line cannon never runs sleepTick and no body ever sleeps.
+        this.world.allowSleep = true;
 
         // Set up advanced physics for more accurate simulation
-        this.world.broadphase.useBoundingBoxes = true;
         this.world.defaultContactMaterial.contactEquationStiffness = 1e7;
         this.world.defaultContactMaterial.contactEquationRelaxation = 4;
         this.world.broadphase = new CANNON.NaiveBroadphase();
+        this.world.broadphase.useBoundingBoxes = true;
+        // Leave solver.iterations at cannon-es's default of 10.
+        //
+        // The performance notes suggest dropping it to 2, and that is a real
+        // trap: measured in the browser harness, anything below 8 leaves the d4
+        // (and often the d8) permanently in sleepState SLEEPY. The solver never
+        // fully resolves their resting contacts, so the residual jitter
+        // occasionally spikes past sleepSpeedLimit, cannon re-wakes the body,
+        // and the one-second sleep timer restarts forever.
+        //
+        // A body that never sleeps means the render loop never stops, which
+        // costs far more than the handful of solver iterations saves. Over
+        // three runs each: 2, 4 and 6 iterations settled 1/3, 0/3 and 0/3;
+        // 8 and 10 settled 3/3. Re-run harness/ if you want to change this.
     }
 
     private createDiceTray() {
+        // updateSettings() and the context-loss handler both call this. Without
+        // tearing the old one down first, every settings change stacked another
+        // floor plane, four more walls and another set of border lines onto the
+        // world — the broadphase then paid for all of them, forever.
+        this.removeDiceTray();
+
         // Create visual tray based on settings
         if (this.settings.showSurface) {
             const trayWidth = 32 * this.settings.trayWidth;
@@ -144,7 +271,7 @@ export class D20Dice {
             });
             this.trayMesh = new THREE.Mesh(trayGeometry, trayMaterial);
             this.trayMesh.position.set(0, -2, 0);
-            this.trayMesh.receiveShadow = this.settings.surfaceReceiveShadow;
+            this.trayMesh.receiveShadow = this.settings.enableShadows;
             this.scene.add(this.trayMesh);
 
             // Add border if enabled (using tray's own border settings)
@@ -156,9 +283,9 @@ export class D20Dice {
                     opacity: this.settings.surfaceBorderOpacity,
                     linewidth: this.settings.surfaceBorderWidth
                 });
-                const borderLines = new THREE.LineSegments(borderGeometry, borderMaterial);
-                borderLines.position.copy(this.trayMesh.position);
-                this.scene.add(borderLines);
+                this.trayBorder = new THREE.LineSegments(borderGeometry, borderMaterial);
+                this.trayBorder.position.copy(this.trayMesh.position);
+                this.scene.add(this.trayBorder);
             }
         }
 
@@ -173,7 +300,16 @@ export class D20Dice {
         floorBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
         floorBody.position.set(0, -2.4, 0);
         this.floorHeight = floorBody.position.y;
-        this.world.addBody(floorBody);
+        this.addTrayBody(floorBody);
+
+        // Blobs sit just above whatever the dice appear to rest on: the top of
+        // the visible tray if there is one, otherwise the physics floor.
+        this.shadowPlaneY = this.settings.showSurface
+            ? TRAY_TOP_Y + 0.02
+            : this.floorHeight + 0.02;
+
+        // The catcher lives on the same plane, so it is rebuilt with the tray.
+        this.createShadowCatcher();
 
         // Physics tray walls - realistic wood/plastic walls
         const wallMaterial = new CANNON.Material('wall');
@@ -191,34 +327,111 @@ export class D20Dice {
         const leftWall = new CANNON.Body({ mass: 0, material: wallMaterial });
         leftWall.addShape(leftWallShape);
         leftWall.position.set(-halfWidth, 0, 0);
-        this.world.addBody(leftWall);
+        this.addTrayBody(leftWall);
 
         // Right wall
         const rightWallShape = new CANNON.Box(new CANNON.Vec3(0.2, 4, halfLength));
         const rightWall = new CANNON.Body({ mass: 0, material: wallMaterial });
         rightWall.addShape(rightWallShape);
         rightWall.position.set(halfWidth, 0, 0);
-        this.world.addBody(rightWall);
+        this.addTrayBody(rightWall);
 
         // Front wall
         const frontWallShape = new CANNON.Box(new CANNON.Vec3(halfWidth, 4, 0.2));
         const frontWall = new CANNON.Body({ mass: 0, material: wallMaterial });
         frontWall.addShape(frontWallShape);
         frontWall.position.set(0, 0, halfLength);
-        this.world.addBody(frontWall);
+        this.addTrayBody(frontWall);
 
         // Back wall
         const backWallShape = new CANNON.Box(new CANNON.Vec3(halfWidth, 4, 0.2));
         const backWall = new CANNON.Body({ mass: 0, material: wallMaterial });
         backWall.addShape(backWallShape);
         backWall.position.set(0, 0, -halfLength);
-        this.world.addBody(backWall);
+        this.addTrayBody(backWall);
+    }
+
+    // =======================================================================
+    // Shadow catcher
+    // =======================================================================
+
+    /**
+     * The plane the dice cast onto.
+     *
+     * A shadow map has to land on geometry, and with the tray surface hidden
+     * there is none — the canvas is transparent over a note. That is why the
+     * plugin's shadow settings drew nothing for so long: not just the
+     * `castShadow` flag being set on a Material instead of the mesh, but no
+     * receiver in the scene at all.
+     *
+     * THREE.ShadowMaterial is the missing piece. A mesh wearing one contributes
+     * nothing to the picture except the shadows falling on it, so this plane is
+     * completely invisible and the shadow appears to lie on whatever is behind
+     * the canvas — the note itself.
+     */
+    private createShadowCatcher(): void {
+        this.removeShadowCatcher();
+        if (!this.settings.enableShadows) return;
+
+        // Keep this close to the tray. The catcher is a transparent plane that
+        // every one of its pixels runs a shadow lookup on, so making it larger
+        // than it needs to be is paid for in fill rate on every frame — an
+        // oversized one was most of why this felt slow.
+        const width = 32 * this.settings.trayWidth + 4;
+        const length = 24 * this.settings.trayLength + 4;
+
+        const material = new THREE.ShadowMaterial({ opacity: SHADOW_OPACITY });
+        // The catcher sits under everything; it must never hide a die.
+        material.depthWrite = false;
+
+        this.shadowCatcher = new THREE.Mesh(new THREE.PlaneGeometry(width, length), material);
+        this.shadowCatcher.rotation.x = -Math.PI / 2;
+        this.shadowCatcher.position.set(0, this.shadowPlaneY, 0);
+        this.shadowCatcher.receiveShadow = true;
+        this.shadowCatcher.renderOrder = -1;
+        this.scene.add(this.shadowCatcher);
+    }
+
+    private removeShadowCatcher(): void {
+        if (!this.shadowCatcher) return;
+        this.scene.remove(this.shadowCatcher);
+        this.shadowCatcher.geometry.dispose();
+        (this.shadowCatcher.material as THREE.Material).dispose();
+        this.shadowCatcher = null;
+    }
+
+    private addTrayBody(body: CANNON.Body): void {
+        this.world.addBody(body);
+        this.trayBodies.push(body);
+    }
+
+    private removeDiceTray(): void {
+        this.removeShadowCatcher();
+
+        if (this.trayMesh) {
+            this.scene.remove(this.trayMesh);
+            this.trayMesh.geometry.dispose();
+            (this.trayMesh.material as THREE.Material).dispose();
+            this.trayMesh = null;
+        }
+
+        if (this.trayBorder) {
+            this.scene.remove(this.trayBorder);
+            this.trayBorder.geometry.dispose();
+            (this.trayBorder.material as THREE.Material).dispose();
+            this.trayBorder = null;
+        }
+
+        for (const body of this.trayBodies) {
+            this.world.removeBody(body);
+        }
+        this.trayBodies.length = 0;
     }
 
     private createDice() {
         // DISABLED: Legacy single-dice creation method
         // Multi-dice system uses createSingleDice() instead
-        console.log('createDice() called but disabled for multi-dice system');
+        log('createDice() called but disabled for multi-dice system');
         return;
 
         // Create a basic fallback material with all configured properties
@@ -244,9 +457,7 @@ export class D20Dice {
         this.dice = new THREE.Mesh(this.diceGeometry, fallbackMaterial);
 
         // Ensure dice is visible by making it reasonably sized
-        console.log(`Creating dice with size: ${this.settings.diceSize}, type: ${this.settings.diceType}`);
-        this.dice.castShadow = this.settings.diceCastShadow;
-        this.dice.receiveShadow = this.settings.diceReceiveShadow;
+        log(`Creating dice with size: ${this.settings.diceSize}, type: ${this.settings.diceType}`);
         this.dice.position.set(0, 2, 0);
         this.scene.add(this.dice);
 
@@ -332,7 +543,7 @@ export class D20Dice {
 
     private applyD10UVMapping(geometry: THREE.BufferGeometry): void {
         // Convert to non-indexed geometry
-        const nonIndexedGeometry = geometry.toNonIndexed();
+        const nonIndexedGeometry = geometry.index ? geometry.toNonIndexed() : geometry;
         geometry.attributes = nonIndexedGeometry.attributes;
         geometry.index = null;
 
@@ -342,7 +553,7 @@ export class D20Dice {
         const positionArray = positionAttribute.array as Float32Array;
 
         const totalTriangles = uvAttribute.count / 3;
-        console.log(`D10: ${totalTriangles} triangles total`);
+        log(`D10: ${totalTriangles} triangles total`);
 
         // 5x2 grid for 10 faces
         const cols = 5;
@@ -397,7 +608,7 @@ export class D20Dice {
             faceGroups[faceIndex].push(i);
         }
 
-        console.log(`D10: Found ${faceGroups.length} faces`);
+        log(`D10: Found ${faceGroups.length} faces`);
 
         // Map each face group to UV coordinates
         for (let faceIndex = 0; faceIndex < Math.min(faceGroups.length, 10); faceIndex++) {
@@ -507,7 +718,7 @@ export class D20Dice {
         }
 
         uvAttribute.needsUpdate = true;
-        console.log('Applied D10 UV mapping with proper kite faces');
+        log('Applied D10 UV mapping with proper kite faces');
     }
 
     private createPentagonalTrapezohedronGeometry(size: number): THREE.BufferGeometry {
@@ -587,7 +798,7 @@ export class D20Dice {
 
     private applyTriangleUVMapping(geometry: THREE.BufferGeometry, faceCount: number): void {
         // Convert to non-indexed geometry so each face has its own vertices
-        const nonIndexedGeometry = geometry.toNonIndexed();
+        const nonIndexedGeometry = geometry.index ? geometry.toNonIndexed() : geometry;
         geometry.attributes = nonIndexedGeometry.attributes;
         geometry.index = null;
 
@@ -618,7 +829,7 @@ export class D20Dice {
             rows = Math.ceil(faceCount / cols);
         }
 
-        console.log(`Applying triangle UV mapping for ${faceCount} faces using ${cols}x${rows} grid`);
+        log(`Applying triangle UV mapping for ${faceCount} faces using ${cols}x${rows} grid`);
         const cellWidth = 1.0 / cols;
         const cellHeight = 1.0 / rows;
         const padding = 0.02; // Small padding between triangles
@@ -686,16 +897,16 @@ export class D20Dice {
         // Mark UV attribute as needing update
         uvAttribute.needsUpdate = true;
 
-        console.log(`Applied triangle UV mapping with equilateral triangles for ${faceCount} faces`);
+        log(`Applied triangle UV mapping with equilateral triangles for ${faceCount} faces`);
     }
 
     private applyTetrahedronUVMapping(geometry: THREE.BufferGeometry): void {
         // Convert to non-indexed geometry for proper UV mapping
-        const nonIndexedGeometry = geometry.toNonIndexed();
+        const nonIndexedGeometry = geometry.index ? geometry.toNonIndexed() : geometry;
         geometry.attributes = nonIndexedGeometry.attributes;
         geometry.index = null;
 
-        console.log('Applying tetrahedron UV mapping for D4');
+        log('Applying tetrahedron UV mapping for D4');
 
         const uvAttribute = geometry.attributes.uv;
         const uvArray = uvAttribute.array as Float32Array;
@@ -749,7 +960,7 @@ export class D20Dice {
         }
 
         uvAttribute.needsUpdate = true;
-        console.log('Applied simple tetrahedron UV mapping for D4 with full grid cells');
+        log('Applied simple tetrahedron UV mapping for D4 with full grid cells');
     }
 
     private applySquareUVMapping(geometry: THREE.BufferGeometry): void {
@@ -757,7 +968,7 @@ export class D20Dice {
         const uvAttribute = geometry.attributes.uv;
         const uvArray = uvAttribute.array as Float32Array;
 
-        console.log('Applying square UV mapping for D6');
+        log('Applying square UV mapping for D6');
 
         // Define UV layout in a 3x2 grid for 6 faces to match template
         const cols = 3;
@@ -802,22 +1013,22 @@ export class D20Dice {
         }
 
         uvAttribute.needsUpdate = true;
-        console.log('Applied square UV mapping for D6 with 3x2 grid layout');
+        log('Applied square UV mapping for D6 with 3x2 grid layout');
     }
 
     private applyD12PentagonUVMapping(geometry: THREE.BufferGeometry): void {
         // Convert to non-indexed geometry so each triangle has its own vertices
-        const nonIndexedGeometry = geometry.toNonIndexed();
+        const nonIndexedGeometry = geometry.index ? geometry.toNonIndexed() : geometry;
         geometry.attributes = nonIndexedGeometry.attributes;
         geometry.index = null;
 
         const uvAttribute = geometry.attributes.uv;
         const uvArray = uvAttribute.array as Float32Array;
 
-        console.log('Applying D12 pentagon UV mapping for 4x3 grid');
+        log('Applying D12 pentagon UV mapping for 4x3 grid');
 
         const totalTriangles = uvAttribute.count / 3;
-        console.log(`D12: ${totalTriangles} triangles total`);
+        log(`D12: ${totalTriangles} triangles total`);
 
         // 4x3 grid for 12 pentagon faces on 1024x1024 image
         const cols = 4;
@@ -828,7 +1039,7 @@ export class D20Dice {
 
         // DodecahedronGeometry creates 60 triangles (5 per face for center-based triangulation)
         const trianglesPerFace = totalTriangles / 12;
-        console.log(`Triangles per face: ${trianglesPerFace}`);
+        log(`Triangles per face: ${trianglesPerFace}`);
 
         // Process each pentagon face
         for (let faceIndex = 0; faceIndex < 12; faceIndex++) {
@@ -931,7 +1142,7 @@ export class D20Dice {
         }
 
         uvAttribute.needsUpdate = true;
-        console.log('Applied adaptive D12 pentagon UV mapping');
+        log('Applied adaptive D12 pentagon UV mapping');
     }
 
     // ============================================================================
@@ -964,26 +1175,27 @@ export class D20Dice {
         const mesh = new THREE.Mesh(geometry, material);
 
         // Position dice to prevent overlapping
-        const position = this.getNextDicePosition();
+        const position = this.getNextDicePosition(diceType);
         mesh.position.copy(position);
 
         // Create physics body
         const body = this.createPhysicsBodyForDiceType(diceType);
         body.position.set(position.x, position.y, position.z);
 
+        // Dice cast onto the shadow catcher, and onto each other.
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+
         // Add to scene and world
         this.scene.add(mesh);
         this.world.addBody(body);
-
-        // Debug: Verify body is in world with correct damping
-        console.log(`🔍 Body added to world. In world: ${this.world.bodies.includes(body)}, damping: linear=${body.linearDamping}, angular=${body.angularDamping}`);
 
         // Add to tracking arrays
         this.diceArray.push(mesh);
         this.diceBodyArray.push(body);
         this.diceTypeArray.push(diceType);
 
-        console.log(`Created ${diceType} dice. Total dice: ${this.diceArray.length}`);
+        this.wake();
     }
 
     private createGeometryForDiceType(diceType: string): THREE.BufferGeometry {
@@ -1059,13 +1271,7 @@ export class D20Dice {
             }
         }
 
-        const material = new THREE.MeshPhongMaterial(materialProps);
-
-        // Configure shadow properties based on settings
-        material.castShadow = this.settings.diceCastShadow;
-        material.receiveShadow = this.settings.diceReceiveShadow;
-
-        return material;
+        return new THREE.MeshPhongMaterial(materialProps);
     }
 
     private getDiceTextureDataForType(diceType: string): string | null {
@@ -1077,27 +1283,36 @@ export class D20Dice {
     }
 
     private loadTextureFromData(textureData: string): THREE.Texture | null {
-        try {
-            const loader = new THREE.TextureLoader();
-            const texture = loader.load(textureData);
-            texture.wrapS = THREE.RepeatWrapping;
-            texture.wrapT = THREE.RepeatWrapping;
-            return texture;
-        } catch (error) {
-            console.warn('Failed to load dice texture:', error);
-            return null;
-        }
+        return this.loadCachedTexture(textureData, 'dice texture');
     }
 
     private loadNormalMapFromData(normalMapData: string): THREE.Texture | null {
+        return this.loadCachedTexture(normalMapData, 'dice normal map');
+    }
+
+    /**
+     * One THREE.Texture per distinct image rather than one per die. The d20
+     * face sheet is about a megabyte of base64 and a full tray used to upload
+     * its own copy of it for every single die.
+     */
+    private loadCachedTexture(data: string, label: string): THREE.Texture | null {
+        const cached = this.textureCache.get(data);
+        if (cached) return cached;
+
         try {
-            const loader = new THREE.TextureLoader();
-            const normalMap = loader.load(normalMapData);
-            normalMap.wrapS = THREE.RepeatWrapping;
-            normalMap.wrapT = THREE.RepeatWrapping;
-            return normalMap;
+            const texture = new THREE.TextureLoader().load(
+                data,
+                // Decoding is asynchronous. Without this the image can arrive
+                // after the render loop has gone idle, leaving an untextured die
+                // on screen until something else happens to wake it.
+                () => this.wake()
+            );
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            this.textureCache.set(data, texture);
+            return texture;
         } catch (error) {
-            console.warn('Failed to load dice normal map:', error);
+            console.warn(`Failed to load ${label}:`, error);
             return null;
         }
     }
@@ -1112,18 +1327,12 @@ export class D20Dice {
 
         const body = new CANNON.Body({
             mass: 1,
-            material: new CANNON.Material({
-                friction: 0.4,
-                restitution: 0.3
-            })
+            material: D20Dice.bodyMaterial
         });
 
         body.addShape(shape);
         body.linearDamping = 0.1; // Normal damping
         body.angularDamping = 0.1; // Normal damping
-
-        // Debug: Log the physics parameters to confirm they're applied
-        console.log(`🎲 Created dice body: mass=${body.mass}, friction=${body.material?.friction}, restitution=${body.material?.restitution}, linearDamping=${body.linearDamping}, angularDamping=${body.angularDamping}`);
 
         // Enable sleeping for better performance
         body.allowSleep = true;
@@ -1134,32 +1343,45 @@ export class D20Dice {
     }
 
     private createPhysicsShapeForDiceType(diceType: string, size: number): CANNON.Shape {
+        // Every die of a given type and size has the same hull, and building one
+        // costs a whole throwaway BufferGeometry, so keep them.
+        const cacheKey = `${diceType}:${size.toFixed(4)}`;
+        const cached = D20Dice.shapeCache.get(cacheKey);
+        if (cached) return cached;
+
+        let shape: CANNON.Shape;
         switch (diceType) {
             case 'd6':
                 // D6 uses box shape for proper cube physics
-                console.log(`🔷 Creating Box physics shape for ${diceType}`);
-                return new CANNON.Box(new CANNON.Vec3(size, size, size));
+                shape = new CANNON.Box(new CANNON.Vec3(size, size, size));
+                break;
 
             case 'd4':
             case 'd8':
             case 'd10':
             case 'd12':
-            case 'd20':
+            case 'd20': {
                 // For complex shapes, create convex polyhedron from geometry
-                console.log(`🔸 Creating ConvexPolyhedron physics shape for ${diceType}`);
                 const geometry = this.createGeometryForDiceType(diceType);
-                const convexShape = this.createConvexPolyhedronFromGeometry(geometry);
+                shape = this.createConvexPolyhedronFromGeometry(geometry);
                 geometry.dispose(); // Clean up geometry after creating physics shape
-                return convexShape;
+                break;
+            }
 
             default:
                 // Fallback to sphere for unknown dice types
-                console.warn(`⚠️ Unknown dice type ${diceType}, using sphere shape`);
-                return new CANNON.Sphere(size);
+                console.warn(`Unknown dice type ${diceType}, using sphere shape`);
+                shape = new CANNON.Sphere(size);
         }
+
+        // The size comes off a slider, so the key space is not bounded. Dropping
+        // the whole map is fine — it only costs the next build.
+        if (D20Dice.shapeCache.size > 24) D20Dice.shapeCache.clear();
+        D20Dice.shapeCache.set(cacheKey, shape);
+        return shape;
     }
 
-    private getNextDicePosition(): THREE.Vector3 {
+    private getNextDicePosition(diceType = 'd20'): THREE.Vector3 {
         const gridSize = 2.5; // Space between dice
         const cols = 8; // Dice per row
         const totalDice = this.diceArray.length;
@@ -1167,9 +1389,20 @@ export class D20Dice {
         const col = totalDice % cols;
         const row = Math.floor(totalDice / cols);
 
+        // Spawn at about resting height rather than two units up.
+        //
+        // The camera looks straight down, so a die falling vertically does not
+        // move on screen at all — but its shadow does, because the offset from
+        // the leaning shadow light is proportional to height. Dropping a die
+        // from 2 units made the shadow slide 32 px out from under a die that
+        // appeared perfectly still, which reads as a second object moving on its
+        // own rather than as a die falling.
+        const scale = (this.settings.diceScales as any)[diceType] || 1.0;
+        const restingHeight = this.settings.diceSize * scale;
+
         return new THREE.Vector3(
             (col - cols / 2) * gridSize,
-            this.floorHeight + 2, // Start above floor
+            this.floorHeight + restingHeight,
             (row - 2) * gridSize
         );
     }
@@ -1196,6 +1429,17 @@ export class D20Dice {
         this.diceTypeArray.length = 0;
         this.selectedDice.length = 0;
         this.draggedDiceIndex = -1;
+        this.originalMaterials.forEach((material) => {
+            const list = Array.isArray(material) ? material : [material];
+            for (const entry of list) entry?.dispose();
+        });
+        this.originalMaterials.clear();
+
+        for (const type of Object.keys(this.settings.diceCounts)) {
+            (this.settings.diceCounts as any)[type] = 0;
+        }
+
+        this.wake();
     }
 
     removeSingleDice(diceType: string): boolean {
@@ -1230,6 +1474,7 @@ export class D20Dice {
                     this.draggedDiceIndex--;
                 }
 
+                this.wake();
                 return true; // Successfully removed
             }
         }
@@ -1257,7 +1502,7 @@ export class D20Dice {
                          body.position.y <= -0.5;
 
         if (isSettled) {
-            console.log(`🎲 Single dice ${diceIndex} settled`);
+            log(`🎲 Single dice ${diceIndex} settled`);
             this.completeSingleDiceRoll(diceIndex);
         } else {
             // Check again in 100ms
@@ -1284,11 +1529,11 @@ export class D20Dice {
                 // Dice is caught - highlight it and show in result
                 this.highlightCaughtDice(diceIndex, true);
                 formattedResult = `1${diceType}(CAUGHT) = CAUGHT - Face confidence: ${checkResult.confidence.toFixed(3)}, required: ${checkResult.requiredConfidence.toFixed(3)}`;
-                console.log(`🥅 Single dice ${diceIndex} (${diceType}) CAUGHT! Face confidence: ${checkResult.confidence.toFixed(3)}, required: ${checkResult.requiredConfidence.toFixed(3)}`);
+                log(`🥅 Single dice ${diceIndex} (${diceType}) CAUGHT! Face confidence: ${checkResult.confidence.toFixed(3)}, required: ${checkResult.requiredConfidence.toFixed(3)}`);
             } else {
                 // Valid result
                 formattedResult = `1${diceType}(${checkResult.result}) = ${checkResult.result}`;
-                console.log(`📊 Single dice roll result: ${formattedResult}`);
+                log(`📊 Single dice roll result: ${formattedResult}`);
             }
 
             this.isRolling = false;
@@ -1317,17 +1562,11 @@ export class D20Dice {
             if (velocity > velocityThreshold || angularVelocity > angularThreshold || body.position.y > -0.5) {
                 allSettled = false;
 
-                // Debug logging (only for first few checks to avoid spam)
-                if (Math.random() < 0.02) { // Log 2% of the time
-                    console.log(`Dice ${i} not settled:`, {
+                if (DEBUG) {
+                    log(`Dice ${i} not settled:`, {
                         velocity: velocity.toFixed(3),
                         angularVelocity: angularVelocity.toFixed(3),
-                        positionY: body.position.y.toFixed(3),
-                        velocityThreshold: velocityThreshold.toFixed(3),
-                        angularThreshold: angularThreshold.toFixed(3),
-                        velocityOK: velocity <= velocityThreshold,
-                        angularOK: angularVelocity <= angularThreshold,
-                        positionOK: body.position.y <= -0.5
+                        positionY: body.position.y.toFixed(3)
                     });
                 }
                 break;
@@ -1335,7 +1574,7 @@ export class D20Dice {
         }
 
         if (allSettled) {
-            console.log('🎲 All dice motion thresholds met - completing roll');
+            log('🎲 All dice motion thresholds met - completing roll');
             // Complete the roll immediately once settled
             this.completeMultiRoll();
         } else {
@@ -1351,7 +1590,7 @@ export class D20Dice {
             this.rollTimeoutId = null;
         }
 
-        console.log('✅ All dice settled - calculating results');
+        log('✅ All dice settled - calculating results');
 
         // Calculate results for all dice using physics-based face detection
         const results: { [key: string]: number[] } = {};
@@ -1370,7 +1609,7 @@ export class D20Dice {
 
         // Format the result string
         const formattedResult = this.formatRollResults(results, totalSum);
-        console.log(`📊 Final roll result: ${formattedResult}`);
+        log(`📊 Final roll result: ${formattedResult}`);
 
         this.isRolling = false;
         if (this.rollTimeout) {
@@ -1390,7 +1629,7 @@ export class D20Dice {
     }
 
     private forceStopMultiRoll(): void {
-        console.log('⏰ Force stopping multi-dice roll due to timeout');
+        log('⏰ Force stopping multi-dice roll due to timeout');
         this.completeMultiRoll();
     }
 
@@ -1407,17 +1646,17 @@ export class D20Dice {
         const faceNormals = this.getFaceNormalsForDiceType(diceType);
 
         // Detection vector based on dice type
-        const detectionVector = diceType === 'd4'
-            ? new THREE.Vector3(0, -1, 0)  // Down vector for D4
-            : new THREE.Vector3(0, 1, 0);   // Up vector for others
+        const detectionVector = diceType === 'd4' ? DOWN : UP;
 
         let bestDotProduct = -Infinity;
         let bestFaceIndex = 0;
 
         // Check each face normal to find which face is pointing up/down
         for (let i = 0; i < faceNormals.length; i++) {
-            // Transform face normal to world space using dice rotation
-            const worldNormal = faceNormals[i].clone();
+            // Transform face normal to world space using dice rotation. The
+            // cached normals are shared, so copy into scratch rather than
+            // rotating them in place.
+            const worldNormal = this.normalScratch.copy(faceNormals[i]);
             worldNormal.applyQuaternion(diceMesh.quaternion);
 
             // Calculate dot product with detection vector
@@ -1444,7 +1683,7 @@ export class D20Dice {
         } else {
             // Face detection succeeded - return the result
             const result = this.mapFaceIndexToNumber(bestFaceIndex, diceType);
-            console.log(`🎯 Dice ${diceIndex} (${diceType}) face detection: face index ${bestFaceIndex} = ${result}, confidence: ${bestDotProduct.toFixed(3)}`);
+            log(`🎯 Dice ${diceIndex} (${diceType}) face detection: face index ${bestFaceIndex} = ${result}, confidence: ${bestDotProduct.toFixed(3)}`);
             return {
                 isCaught: false,
                 result: result,
@@ -1467,7 +1706,21 @@ export class D20Dice {
         return checkResult.result!;
     }
 
+    /**
+     * Face normals depend only on the dice type, and checkDiceResult() runs ten
+     * times a second per die while rolling — building a hundred Vector3s each
+     * time was pure garbage.
+     */
     private getFaceNormalsForDiceType(diceType: string): THREE.Vector3[] {
+        let normals = D20Dice.faceNormalCache.get(diceType);
+        if (!normals) {
+            normals = this.computeFaceNormalsForDiceType(diceType);
+            D20Dice.faceNormalCache.set(diceType, normals);
+        }
+        return normals;
+    }
+
+    private computeFaceNormalsForDiceType(diceType: string): THREE.Vector3[] {
         switch (diceType) {
             case 'd4':
                 // THREE.js TetrahedronGeometry creates a regular tetrahedron with vertices:
@@ -1517,12 +1770,6 @@ export class D20Dice {
                 const e3_2 = new THREE.Vector3().subVectors(v1, v2);
                 let n3 = new THREE.Vector3().crossVectors(e3_1, e3_2).normalize();
                 if (n3.dot(face3Center.clone().sub(center)) < 0) n3.negate();
-
-                console.log('D4 Face normals calculated:');
-                console.log(`  Face 0 (value 1): (${n0.x.toFixed(3)}, ${n0.y.toFixed(3)}, ${n0.z.toFixed(3)})`);
-                console.log(`  Face 1 (value 2): (${n1.x.toFixed(3)}, ${n1.y.toFixed(3)}, ${n1.z.toFixed(3)})`);
-                console.log(`  Face 2 (value 3): (${n2.x.toFixed(3)}, ${n2.y.toFixed(3)}, ${n2.z.toFixed(3)})`);
-                console.log(`  Face 3 (value 4): (${n3.x.toFixed(3)}, ${n3.y.toFixed(3)}, ${n3.z.toFixed(3)})`);
 
                 return [n0, n1, n2, n3];
 
@@ -1686,12 +1933,14 @@ export class D20Dice {
             dice.rotation.z += (Math.random() - 0.5) * 2;
 
             // Add small physics impulse for visual effect
+            body.wakeUp();
             body.velocity.set(
                 (Math.random() - 0.5) * 2,
                 Math.random() * 2,
                 (Math.random() - 0.5) * 2
             );
         }
+        this.wake();
     }
 
     // ============================================================================
@@ -1699,16 +1948,18 @@ export class D20Dice {
     private createPhysicsBody(): void {
         // DISABLED: Legacy single-dice physics body creation
         // Multi-dice system uses createPhysicsBodyForDiceType() instead
-        console.log('createPhysicsBody() called but disabled for multi-dice system');
+        log('createPhysicsBody() called but disabled for multi-dice system');
         return;
     }
 
     private createConvexPolyhedronFromGeometry(geometry: THREE.BufferGeometry): CANNON.ConvexPolyhedron {
-        const workingGeometry = geometry.toNonIndexed();
+        const workingGeometry = geometry.index ? geometry.toNonIndexed() : geometry;
         const positionAttribute = workingGeometry.attributes.position;
 
+        const ownsWorkingCopy = workingGeometry !== geometry;
+
         if (!positionAttribute) {
-            workingGeometry.dispose();
+            if (ownsWorkingCopy) workingGeometry.dispose();
             throw new Error('Cannot create convex polyhedron: missing position attribute');
         }
 
@@ -1736,7 +1987,7 @@ export class D20Dice {
             faces.push(face);
         }
 
-        workingGeometry.dispose();
+        if (ownsWorkingCopy) workingGeometry.dispose();
 
         const shape = new CANNON.ConvexPolyhedron({ vertices, faces });
         shape.computeNormals();
@@ -1753,11 +2004,11 @@ export class D20Dice {
             this.faceNumbers.push(i + 1);
         }
 
-        console.log(`Initialized ${faceCount} face numbers for ${this.settings.diceType}:`, this.faceNumbers);
+        log(`Initialized ${faceCount} face numbers for ${this.settings.diceType}:`, this.faceNumbers);
     }
 
     private calculateFaceNormals() {
-        console.log(`🔍 Calculating face normals for ${this.settings.diceType}...`);
+        log(`🔍 Calculating face normals for ${this.settings.diceType}...`);
 
         if (!this.diceGeometry) {
             console.error('Cannot calculate face normals: dice geometry not available');
@@ -1808,12 +2059,12 @@ export class D20Dice {
                 break;
         }
 
-        console.log(`✅ Calculated ${this.faceNormals.length} face normals for ${this.settings.diceType}`);
+        log(`✅ Calculated ${this.faceNormals.length} face normals for ${this.settings.diceType}`);
 
         // Debug: log the first few normals
         for (let i = 0; i < Math.min(5, this.faceNormals.length); i++) {
             const normal = this.faceNormals[i];
-            console.log(`Face ${i + 1} normal:`, normal.x.toFixed(3), normal.y.toFixed(3), normal.z.toFixed(3));
+            log(`Face ${i + 1} normal:`, normal.x.toFixed(3), normal.y.toFixed(3), normal.z.toFixed(3));
         }
     }
 
@@ -1963,15 +2214,15 @@ export class D20Dice {
         // Add texture if available
         if (customTexture) {
             materialProperties.map = customTexture;
-            console.log(`Applied custom texture to ${this.settings.diceType} with color tint ${this.settings.diceColor}`);
+            log(`Applied custom texture to ${this.settings.diceType} with color tint ${this.settings.diceColor}`);
         } else {
-            console.log(`Using solid color material for ${this.settings.diceType}: ${this.settings.diceColor}`);
+            log(`Using solid color material for ${this.settings.diceType}: ${this.settings.diceColor}`);
         }
 
         // Add normal map if available
         if (normalMap) {
             materialProperties.normalMap = normalMap;
-            console.log(`Applied normal map to ${this.settings.diceType}`);
+            log(`Applied normal map to ${this.settings.diceType}`);
         }
 
         // Create and apply the material
@@ -2080,7 +2331,7 @@ export class D20Dice {
             { face: 20, color: '#DC143C', name: 'Crimson' }
         ];
 
-        console.log('🎲 D20 Face-to-Color Mapping:');
+        log('🎲 D20 Face-to-Color Mapping:');
         console.table(colorMapping);
     }
 
@@ -2127,7 +2378,7 @@ export class D20Dice {
             // Load the image
             img.onload = () => {
                 texture.needsUpdate = true;
-                console.log('Custom texture loaded successfully');
+                log('Custom texture loaded successfully');
             };
 
             img.onerror = (error) => {
@@ -2174,7 +2425,7 @@ export class D20Dice {
             // Load the image
             img.onload = () => {
                 normalMap.needsUpdate = true;
-                console.log('Normal map loaded successfully');
+                log('Normal map loaded successfully');
             };
 
             img.onerror = (error) => {
@@ -2202,6 +2453,13 @@ export class D20Dice {
                 this.scene.remove(this.directionalLight.target);
             }
         }
+        if (this.shadowLight) {
+            this.shadowLight.shadow.map?.dispose();
+            this.scene.remove(this.shadowLight);
+            this.scene.remove(this.shadowLight.target);
+            this.shadowLight.dispose();
+            this.shadowLight = null;
+        }
 
         // Ambient light with configurable intensity and color
         this.ambientLight = new THREE.AmbientLight(
@@ -2226,28 +2484,79 @@ export class D20Dice {
         // Target the center of the dice tray
         this.directionalLight.target.position.set(0, -2, 0);
 
-        // Configure shadows if enabled
-        this.directionalLight.castShadow = this.settings.enableShadows;
-
-        if (this.settings.enableShadows) {
-            // Configure shadow camera for optimal shadow quality
-            this.directionalLight.shadow.camera.near = 0.1;
-            this.directionalLight.shadow.camera.far = 100;
-            this.directionalLight.shadow.camera.left = -20;
-            this.directionalLight.shadow.camera.right = 20;
-            this.directionalLight.shadow.camera.top = 20;
-            this.directionalLight.shadow.camera.bottom = -20;
-
-            // Higher resolution shadows
-            this.directionalLight.shadow.mapSize.width = 2048;
-            this.directionalLight.shadow.mapSize.height = 2048;
-
-            // Soft shadow bias to reduce shadow acne
-            this.directionalLight.shadow.bias = -0.0001;
-        }
+        // The scene light does the shading and nothing else.
+        this.directionalLight.castShadow = false;
 
         this.scene.add(this.directionalLight);
         this.scene.add(this.directionalLight.target);
+
+        this.setupShadowLight();
+    }
+
+    /**
+     * A second directional light, of zero intensity, that exists only to cast.
+     *
+     * Two problems make this the right shape rather than just switching
+     * castShadow on for the light above.
+     *
+     * The camera looks straight down and the configured light is nearly
+     * overhead — (9, 50, 0) by default — so a die's shadow lands almost exactly
+     * underneath it and the die hides its own shadow completely. The fix is to
+     * lean the caster over, and that must not disturb how the dice are lit.
+     *
+     * The reason a light with no intensity can still cast is THREE.ShadowMaterial:
+     * it draws the shadow mask directly rather than darkening a light's
+     * contribution, so the shadow survives even though this light adds nothing
+     * to the picture. Verified in the running app, not assumed.
+     */
+    private setupShadowLight(): void {
+        if (!this.settings.enableShadows) return;
+
+        this.shadowLight = new THREE.DirectionalLight(0xffffff, 0);
+
+        // Keep the shadow going the same way as the configured light, so it
+        // agrees with which side of the dice is lit — just far less steeply.
+        const x = this.settings.directionalLightPositionX;
+        const z = this.settings.directionalLightPositionZ;
+        const horizontal = Math.hypot(x, z);
+        const azimuth = horizontal > 1e-3
+            ? { x: x / horizontal, z: z / horizontal }
+            : SHADOW_DEFAULT_AZIMUTH;
+
+        const height = Math.max(this.settings.directionalLightPositionY, 10);
+        this.shadowLight.position.set(
+            azimuth.x * height * SHADOW_LEAN,
+            height,
+            azimuth.z * height * SHADOW_LEAN
+        );
+        this.shadowLight.target.position.set(0, this.shadowPlaneY, 0);
+        this.shadowLight.castShadow = true;
+
+        // Fit the shadow camera to the tray. Left at three.js's default it is a
+        // 10-unit box around the origin, and a die thrown past that simply
+        // stops casting — which reads as the shadow blinking out.
+        const halfWidth = (32 * this.settings.trayWidth) / 2;
+        const halfLength = (24 * this.settings.trayLength) / 2;
+        // The lean pushes shadows outside the tray footprint, so allow for it.
+        const reach = Math.max(halfWidth, halfLength) * (1 + SHADOW_LEAN) + 4;
+
+        const camera = this.shadowLight.shadow.camera as THREE.OrthographicCamera;
+        camera.left = -reach;
+        camera.right = reach;
+        camera.top = reach;
+        camera.bottom = -reach;
+        camera.near = 0.5;
+        camera.far = height * 3 + 40;
+        camera.updateProjectionMatrix();
+
+        const shadow = this.shadowLight.shadow;
+        shadow.mapSize.width = SHADOW_MAP_SIZE;
+        shadow.mapSize.height = SHADOW_MAP_SIZE;
+        shadow.bias = SHADOW_BIAS;
+        shadow.normalBias = SHADOW_NORMAL_BIAS;
+
+        this.scene.add(this.shadowLight);
+        this.scene.add(this.shadowLight.target);
     }
 
     private setupDragControls() {
@@ -2268,10 +2577,69 @@ export class D20Dice {
         canvas.style.pointerEvents = 'none';
     }
 
+    /** Cached because getBoundingClientRect() forces a layout flush. */
+    private getRect(): DOMRect {
+        if (!this.cachedRect) {
+            this.cachedRect = this.renderer.domElement.getBoundingClientRect();
+        }
+        return this.cachedRect;
+    }
+
+    private setCursor(value: string): void {
+        if (this.currentCursor === value) return;
+        this.currentCursor = value;
+        this.renderer.domElement.style.cursor = value;
+    }
+
     private updateMousePosition(clientX: number, clientY: number) {
-        const rect = this.renderer.domElement.getBoundingClientRect();
+        const rect = this.getRect();
         this.mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    }
+
+    /**
+     * Hit-test by distance to the projected centre rather than by raycasting the
+     * mesh. A tumbling icosahedron presents thin edges and sharp corners, so
+     * "on the die" by geometry is a target that changes shape under the hand and
+     * shrinks to a sliver when a die lands on an edge. A radius is the target a
+     * person perceives, it allocates nothing, and it is pure arithmetic.
+     * Returns -1 for a miss.
+     */
+    private pickDiceIndex(clientX: number, clientY: number): number {
+        if (this.diceArray.length === 0) return -1;
+
+        const rect = this.getRect();
+        const px = clientX - rect.left;
+        const py = clientY - rect.top;
+        // Orthographic camera: world units map linearly onto pixels.
+        const pxPerUnit = rect.width / (this.camera.right - this.camera.left);
+
+        let best = -1;
+        let bestDist = Infinity;
+
+        for (let i = 0; i < this.diceArray.length; i++) {
+            const mesh = this.diceArray[i];
+            if (!mesh) continue;
+
+            this.pickVec.copy(mesh.position).project(this.camera);
+            const sx = (this.pickVec.x * 0.5 + 0.5) * rect.width;
+            const sy = (-this.pickVec.y * 0.5 + 0.5) * rect.height;
+
+            const type = this.diceTypeArray[i] || 'd20';
+            const scale = (this.settings.diceScales as any)[type] || 1.0;
+            // 1.25 gives a little forgiveness around the silhouette.
+            const radius = this.settings.diceSize * scale * 1.25 * pxPerUnit;
+
+            const dx = sx - px;
+            const dy = sy - py;
+            const dist2 = dx * dx + dy * dy;
+            if (dist2 <= radius * radius && dist2 < bestDist) {
+                bestDist = dist2;
+                best = i;
+            }
+        }
+
+        return best;
     }
 
     private onMouseDown(event: MouseEvent) {
@@ -2317,18 +2685,8 @@ export class D20Dice {
 
         // Check for hover to show visual feedback only (multi-dice system)
         if (!this.isRolling && !this.isDragging && this.diceArray.length > 0) {
-            this.raycaster.setFromCamera(this.mouse, this.camera);
-            const intersects = this.raycaster.intersectObjects(this.diceArray, true);
-
-            this.isHoveringDice = intersects.length > 0;
-
-            // Update cursor for visual feedback
-            const canvas = this.renderer.domElement;
-            if (this.isHoveringDice && !this.forceClickthroughMode) {
-                canvas.style.cursor = 'grab';
-            } else {
-                canvas.style.cursor = 'default';
-            }
+            this.isHoveringDice = this.pickDiceIndex(event.clientX, event.clientY) !== -1;
+            this.setCursor(this.isHoveringDice && !this.forceClickthroughMode ? 'grab' : 'default');
         }
 
         if (this.isDragging) {
@@ -2344,23 +2702,30 @@ export class D20Dice {
             this.lastMousePosition = { x: event.clientX, y: event.clientY, time: currentTime };
 
             this.updateDicePosition();
-            this.renderer.domElement.style.cursor = 'grabbing';
+            this.setCursor('grabbing');
+            // Draw from this event rather than waiting for the next frame: a rAF
+            // callback can run before that frame's pointer move is delivered,
+            // which leaves the die one move behind the cursor. Browsers coalesce
+            // moves to one per frame, so this costs no extra draws.
+            this.lastDragRender = performance.now();
+            this.renderFrame(true);
         }
     }
 
     private onMouseEnter(event: MouseEvent) {
+        // The overlay only moves on resize, so re-reading the rect on entry is
+        // enough to keep the cached one honest.
+        this.cachedRect = null;
         this.updateMousePosition(event.clientX, event.clientY);
         if (!this.isRolling && !this.isDragging && this.diceArray.length > 0) {
-            this.raycaster.setFromCamera(this.mouse, this.camera);
-            const intersects = this.raycaster.intersectObjects(this.diceArray, true);
-            this.isHoveringDice = intersects.length > 0;
+            this.isHoveringDice = this.pickDiceIndex(event.clientX, event.clientY) !== -1;
         }
     }
 
     private onMouseLeave(event: MouseEvent) {
         if (!this.isDragging) {
             this.isHoveringDice = false;
-            this.renderer.domElement.style.cursor = 'default';
+            this.setCursor('default');
         }
     }
 
@@ -2384,6 +2749,8 @@ export class D20Dice {
 
             this.updateMousePosition(event.touches[0].clientX, event.touches[0].clientY);
             this.updateDicePosition();
+            this.lastDragRender = performance.now();
+            this.renderFrame(true);
             event.preventDefault();
         }
     }
@@ -2402,25 +2769,9 @@ export class D20Dice {
     }
 
     private checkDiceClick(event: MouseEvent) {
-        this.raycaster.setFromCamera(this.mouse, this.camera);
+        const clickedDiceIndex = this.pickDiceIndex(event.clientX, event.clientY);
 
-        // Check for intersections with all dice
-        const intersects = this.raycaster.intersectObjects(this.diceArray, true);
-
-        if (intersects.length > 0) {
-            // Find which dice was clicked
-            const clickedObject = intersects[0].object;
-            let clickedDiceIndex = -1;
-
-            for (let i = 0; i < this.diceArray.length; i++) {
-                if (this.diceArray[i] === clickedObject) {
-                    clickedDiceIndex = i;
-                    break;
-                }
-            }
-
-            if (clickedDiceIndex === -1) return false;
-
+        if (clickedDiceIndex !== -1) {
             // Only prevent event propagation when actually clicking on dice
             event.stopPropagation();
             event.preventDefault();
@@ -2467,17 +2818,17 @@ export class D20Dice {
         // Update dice count in settings
         (this.settings.diceCounts as any)[diceType]--;
 
-        console.log(`Deleted ${diceType} dice. Remaining: ${this.diceArray.length}`);
+        this.wake();
     }
 
     private startDragSingleDice(index: number): void {
         this.isDragging = true;
         this.draggedDiceIndex = index;
-        this.renderer.domElement.style.cursor = 'grabbing';
+        this.setCursor('grabbing');
 
         // Clear highlight if this dice is highlighted (completed)
         if (this.originalMaterials.has(index)) {
-            console.log(`🔄 Clearing highlight from dice ${index} - starting drag`);
+            log(`🔄 Clearing highlight from dice ${index} - starting drag`);
             this.highlightCaughtDice(index, false);
         }
 
@@ -2505,15 +2856,17 @@ export class D20Dice {
 
         // Reset the dragged dice position for dragging
         const body = this.diceBodyArray[index];
+        body.wakeUp();
         body.position.set(0, 2, 0);
         body.velocity.set(0, 0, 0);
         body.angularVelocity.set(0, 0, 0);
+        this.wake();
     }
 
     private startDragAllDice(): void {
         this.isDragging = true;
         this.draggedDiceIndex = -1; // -1 indicates all dice
-        this.renderer.domElement.style.cursor = 'grabbing';
+        this.setCursor('grabbing');
 
         // Initialize velocity tracking
         this.lastMousePosition = { x: this.dragStartPosition.x, y: this.dragStartPosition.y, time: Date.now() };
@@ -2534,7 +2887,7 @@ export class D20Dice {
 
             // Clear highlight if this dice is highlighted (completed)
             if (this.originalMaterials.has(i)) {
-                console.log(`🔄 Clearing highlight from dice ${i} - starting drag all`);
+                log(`🔄 Clearing highlight from dice ${i} - starting drag all`);
                 this.highlightCaughtDice(i, false);
             }
 
@@ -2549,6 +2902,7 @@ export class D20Dice {
                 state.lastMotion = Date.now();
             }
 
+            body.wakeUp();
             body.position.set(
                 Math.cos(angle) * spread,
                 2,
@@ -2557,9 +2911,20 @@ export class D20Dice {
             body.velocity.set(0, 0, 0);
             body.angularVelocity.set(0, 0, 0);
         }
+        this.wake();
     }
 
+    /** Pointer-driven move: place the held dice and spin them. */
     private updateDicePosition() {
+        this.applyDragPosition(true);
+    }
+
+    /**
+     * Write the held dice to the pointer position. The spin is only applied on
+     * a real pointer move — animate() calls this after each step purely to undo
+     * the solver's correction, and spinning there too would double the rate.
+     */
+    private applyDragPosition(spin = false) {
         if (!this.isDragging) return;
 
         // For orthographic camera, convert mouse coordinates directly to world coordinates
@@ -2592,9 +2957,11 @@ export class D20Dice {
                 body.position.z += Math.sin(angle) * spread;
 
                 // Add rolling animation while dragging
-                mesh.rotation.x += 0.05;
-                mesh.rotation.y += 0.05;
-                mesh.rotation.z += 0.025;
+                if (spin) {
+                    mesh.rotation.x += 0.05;
+                    mesh.rotation.y += 0.05;
+                    mesh.rotation.z += 0.025;
+                }
             }
         } else if (this.draggedDiceIndex >= 0 && this.draggedDiceIndex < this.diceBodyArray.length) {
             // Drag single dice
@@ -2604,15 +2971,17 @@ export class D20Dice {
             body.position.copy(worldPosition);
 
             // Add rolling animation while dragging
-            mesh.rotation.x += 0.1;
-            mesh.rotation.y += 0.1;
-            mesh.rotation.z += 0.05;
+            if (spin) {
+                mesh.rotation.x += 0.1;
+                mesh.rotation.y += 0.1;
+                mesh.rotation.z += 0.05;
+            }
         }
     }
 
     private throwDice(endX: number, endY: number) {
         this.isDragging = false;
-        this.renderer.domElement.style.cursor = 'default';
+        this.setCursor('default');
 
         this.isRolling = true;
 
@@ -2645,6 +3014,8 @@ export class D20Dice {
                 throwForce.x += (Math.random() - 0.5) * 5;
                 throwForce.z += (Math.random() - 0.5) * 5;
 
+                // Setting velocity on a sleeping body does nothing on its own.
+                body.wakeUp();
                 body.velocity.copy(throwForce);
 
                 // Apply spin based on velocity direction and magnitude
@@ -2658,6 +3029,7 @@ export class D20Dice {
         } else if (this.draggedDiceIndex >= 0 && this.draggedDiceIndex < this.diceBodyArray.length) {
             // Throw single dice
             const body = this.diceBodyArray[this.draggedDiceIndex];
+            body.wakeUp();
             body.velocity.copy(baseThrowForce);
 
             // Apply spin based on velocity direction and magnitude
@@ -2687,7 +3059,7 @@ export class D20Dice {
                 state.result = null;
                 state.stableTime = 0;
                 state.lastMotion = Date.now();
-                console.log(`🔄 Rerolling dice ${rolledDiceIndex} as part of active group roll - state reset`);
+                log(`🔄 Rerolling dice ${rolledDiceIndex} as part of active group roll - state reset`);
                 // Don't call checkSingleDiceSettling - let the group monitor handle it
             } else {
                 // True single dice roll - check only that dice
@@ -2715,7 +3087,8 @@ export class D20Dice {
         // Set timeout for force stop
         const baseTimeout = 6000;
         const extendedTimeout = baseTimeout + (this.settings.motionThreshold * 1000);
-        console.log(`🕐 Throw timeout set to ${extendedTimeout}ms`);
+
+        this.wake();
 
         this.rollTimeout = setTimeout(() => {
             if (rollingSingleDice) {
@@ -2732,11 +3105,8 @@ export class D20Dice {
             this.rollTimeout = null;
         }
 
-        console.log('Force stopping dice roll');
         this.isRolling = false;
-
-        const canvas = this.renderer.domElement;
-        canvas.style.cursor = 'default';
+        this.setCursor('default');
 
         this.diceBody.velocity.set(0, 0, 0);
         this.diceBody.angularVelocity.set(0, 0, 0);
@@ -2744,48 +3114,95 @@ export class D20Dice {
         this.calculateResult();
     }
 
-    private animate() {
-        // Stop animation loop if view is no longer active
-        if (!this.isViewActive) {
-            console.log('🛑 Animation loop stopped - view is no longer active');
-            if (this.animationId !== null) {
-                cancelAnimationFrame(this.animationId);
-                this.animationId = null;
-            }
-            return;
+    /**
+     * Restart the render loop. Every mutation that changes what is on screen —
+     * a throw, a drag, a resize, a new die, a settings change, a highlight —
+     * has to call this, because animate() stops itself as soon as the dice are
+     * asleep and nothing else is pending.
+     */
+    private wake(): void {
+        this.needsRender = true;
+        if (this.animationId === null && this.isViewActive && this.renderer) {
+            this.lastFrameTime = 0;
+            this.animationId = requestAnimationFrame(this.animateBound);
         }
+    }
 
-        this.animationId = requestAnimationFrame(() => this.animate());
-
-        // Step physics simulation with fixed timestep for consistency
-        this.world.step(1/60);
-
-        // Debug: Check physics values occasionally
-        if (this.isRolling && Math.random() < 0.01) { // 1% chance
-            if (this.diceBodyArray.length > 0) {
-                const body = this.diceBodyArray[0];
-                console.log(`🎯 Physics debug: vel=${body.velocity.length().toFixed(3)}, angVel=${body.angularVelocity.length().toFixed(3)}, damping: linear=${body.linearDamping}, angular=${body.angularDamping}, worldBodies: ${this.world.bodies.length}, time: ${this.world.time.toFixed(2)}`);
-            }
-        }
-
-        // Update all dice visual positions from physics bodies (unless showing result animation)
-        if (!this.showingResult) {
+    /** Copy physics transforms onto the meshes and draw one frame. */
+    private renderFrame(syncFromPhysics: boolean): void {
+        if (syncFromPhysics) {
             for (let i = 0; i < this.diceArray.length; i++) {
                 const dice = this.diceArray[i];
                 const body = this.diceBodyArray[i];
-                if (dice && body) {
-                    dice.position.copy(body.position as any);
+                if (!dice || !body) continue;
+                dice.position.copy(body.position as any);
+                // updateDicePosition() spins the held die by hand; copying the
+                // body quaternion over it would erase that spin every frame.
+                const isHeld = this.isDragging &&
+                    (this.draggedDiceIndex === -1 || this.draggedDiceIndex === i);
+                if (!isHeld) {
                     dice.quaternion.copy(body.quaternion as any);
                 }
             }
         }
 
-        // Note: Hover circle functionality disabled for multi-dice system
-
-        // Note: Rolling detection simplified for multi-dice system
-        // Individual dice rolling logic will be implemented in future phases
-
         this.renderer.render(this.scene, this.camera);
+        this.needsRender = false;
+    }
+
+    private animate() {
+        this.animationId = null;
+
+        if (!this.isViewActive) {
+            return;
+        }
+
+        const now = performance.now();
+        // A backgrounded tab resumes with a delta of several seconds; integrating
+        // that in one go teleports dice through the tray walls.
+        const dt = this.lastFrameTime === 0
+            ? 1 / 60
+            : Math.min((now - this.lastFrameTime) / 1000, 0.05);
+        this.lastFrameTime = now;
+
+        let anyAwake = false;
+        for (let i = 0; i < this.diceBodyArray.length; i++) {
+            const body = this.diceBodyArray[i];
+            if (body && body.sleepState !== CANNON.Body.SLEEPING) {
+                anyAwake = true;
+                break;
+            }
+        }
+
+        if (anyAwake) {
+            // Passing the real delta and a substep cap decouples the fall speed
+            // from the display refresh rate.
+            this.world.step(1 / 60, dt, 2);
+
+            // The solver has just applied gravity to the held die and pushed it
+            // back out of whatever it was resting against. Drawing that is what
+            // reads as the die lagging behind the cursor, so put it back where
+            // the pointer actually is before anything is rendered.
+            if (this.isDragging) {
+                this.applyDragPosition();
+            }
+        }
+
+        // While the pointer is moving, onMouseMove has already drawn this frame
+        // from a fresher position than this callback can see. Only draw here to
+        // cover a held-still pointer with other dice still in motion.
+        const pointerDrewRecently = this.isDragging && (now - this.lastDragRender) < 32;
+
+        if (!pointerDrewRecently && (anyAwake || this.showingResult || this.needsRender)) {
+            this.renderFrame(!this.showingResult);
+        }
+
+        // Nothing moving and nothing pending: let the loop die.
+        const keepGoing = anyAwake || this.showingResult || this.needsRender || this.isDragging;
+        this.animationId = keepGoing ? requestAnimationFrame(this.animateBound) : null;
+        if (!keepGoing) {
+            this.lastFrameTime = 0;
+        }
     }
 
 
@@ -2798,7 +3215,7 @@ export class D20Dice {
 
     private calculateResult(): void {
         const result = this.getTopFaceNumber();
-        console.log(`Natural dice result: ${result}`);
+        log(`Natural dice result: ${result}`);
 
         // Snap behavior removed - UV mapping handles proper face display
 
@@ -2842,7 +3259,7 @@ export class D20Dice {
         const targetRotation = faceRotations[targetFaceNumber];
 
         if (targetRotation) {
-            console.log(`Using calibrated rotation for face ${targetFaceNumber}:`, targetRotation);
+            log(`Using calibrated rotation for face ${targetFaceNumber}:`, targetRotation);
             return targetRotation;
         } else {
             console.warn(`No calibrated rotation found for face ${targetFaceNumber}, using default`);
@@ -2851,69 +3268,69 @@ export class D20Dice {
     }
 
     public debugPhysics(): void {
-        console.log('❌ Legacy debugPhysics() disabled for multi-dice system');
+        log('❌ Legacy debugPhysics() disabled for multi-dice system');
         return;
 
-        console.group('🎲 DICE PHYSICS DEBUG');
+        log('🎲 DICE PHYSICS DEBUG');
 
         // Current detected face
         const detectedFace = this.getTopFaceNumber();
-        console.log(`🎯 Detected Face: ${detectedFace}`);
+        log(`🎯 Detected Face: ${detectedFace}`);
 
         // Physics body properties
-        console.group('⚙️ Physics Body');
-        console.log(`Position: (${this.diceBody.position.x.toFixed(3)}, ${this.diceBody.position.y.toFixed(3)}, ${this.diceBody.position.z.toFixed(3)})`);
-        console.log(`Velocity: (${this.diceBody.velocity.x.toFixed(3)}, ${this.diceBody.velocity.y.toFixed(3)}, ${this.diceBody.velocity.z.toFixed(3)})`);
-        console.log(`Linear Speed: ${this.diceBody.velocity.length().toFixed(3)} m/s`);
-        console.log(`Angular Velocity: (${this.diceBody.angularVelocity.x.toFixed(3)}, ${this.diceBody.angularVelocity.y.toFixed(3)}, ${this.diceBody.angularVelocity.z.toFixed(3)})`);
-        console.log(`Angular Speed: ${this.diceBody.angularVelocity.length().toFixed(3)} rad/s`);
-        console.log(`Mass: ${this.diceBody.mass} kg`);
-        console.log(`Type: ${this.diceBody.type === CANNON.Body.DYNAMIC ? 'DYNAMIC' : this.diceBody.type === CANNON.Body.STATIC ? 'STATIC' : 'KINEMATIC'}`);
-        console.groupEnd();
+        log('⚙️ Physics Body');
+        log(`Position: (${this.diceBody.position.x.toFixed(3)}, ${this.diceBody.position.y.toFixed(3)}, ${this.diceBody.position.z.toFixed(3)})`);
+        log(`Velocity: (${this.diceBody.velocity.x.toFixed(3)}, ${this.diceBody.velocity.y.toFixed(3)}, ${this.diceBody.velocity.z.toFixed(3)})`);
+        log(`Linear Speed: ${this.diceBody.velocity.length().toFixed(3)} m/s`);
+        log(`Angular Velocity: (${this.diceBody.angularVelocity.x.toFixed(3)}, ${this.diceBody.angularVelocity.y.toFixed(3)}, ${this.diceBody.angularVelocity.z.toFixed(3)})`);
+        log(`Angular Speed: ${this.diceBody.angularVelocity.length().toFixed(3)} rad/s`);
+        log(`Mass: ${this.diceBody.mass} kg`);
+        log(`Type: ${this.diceBody.type === CANNON.Body.DYNAMIC ? 'DYNAMIC' : this.diceBody.type === CANNON.Body.STATIC ? 'STATIC' : 'KINEMATIC'}`);
+        
 
         // Visual mesh properties
-        console.group('👁️ Visual Mesh');
-        console.log(`Rotation (Euler): (${this.dice.rotation.x.toFixed(3)}, ${this.dice.rotation.y.toFixed(3)}, ${this.dice.rotation.z.toFixed(3)})`);
-        console.log(`Position: (${this.dice.position.x.toFixed(3)}, ${this.dice.position.y.toFixed(3)}, ${this.dice.position.z.toFixed(3)})`);
-        console.log(`Scale: (${this.dice.scale.x.toFixed(3)}, ${this.dice.scale.y.toFixed(3)}, ${this.dice.scale.z.toFixed(3)})`);
-        console.groupEnd();
+        log('👁️ Visual Mesh');
+        log(`Rotation (Euler): (${this.dice.rotation.x.toFixed(3)}, ${this.dice.rotation.y.toFixed(3)}, ${this.dice.rotation.z.toFixed(3)})`);
+        log(`Position: (${this.dice.position.x.toFixed(3)}, ${this.dice.position.y.toFixed(3)}, ${this.dice.position.z.toFixed(3)})`);
+        log(`Scale: (${this.dice.scale.x.toFixed(3)}, ${this.dice.scale.y.toFixed(3)}, ${this.dice.scale.z.toFixed(3)})`);
+        
 
         // Physics quaternion vs Euler comparison
-        console.group('🔄 Rotation Analysis');
+        log('🔄 Rotation Analysis');
         const physicsQuat = this.diceBody.quaternion;
         const visualEuler = this.dice.rotation;
         const physicsEuler = new THREE.Euler().setFromQuaternion(
             new THREE.Quaternion(physicsQuat.x, physicsQuat.y, physicsQuat.z, physicsQuat.w)
         );
-        console.log(`Physics Quaternion: (${physicsQuat.x.toFixed(3)}, ${physicsQuat.y.toFixed(3)}, ${physicsQuat.z.toFixed(3)}, ${physicsQuat.w.toFixed(3)})`);
-        console.log(`Physics as Euler: (${physicsEuler.x.toFixed(3)}, ${physicsEuler.y.toFixed(3)}, ${physicsEuler.z.toFixed(3)})`);
-        console.log(`Visual Euler: (${visualEuler.x.toFixed(3)}, ${visualEuler.y.toFixed(3)}, ${visualEuler.z.toFixed(3)})`);
-        console.groupEnd();
+        log(`Physics Quaternion: (${physicsQuat.x.toFixed(3)}, ${physicsQuat.y.toFixed(3)}, ${physicsQuat.z.toFixed(3)}, ${physicsQuat.w.toFixed(3)})`);
+        log(`Physics as Euler: (${physicsEuler.x.toFixed(3)}, ${physicsEuler.y.toFixed(3)}, ${physicsEuler.z.toFixed(3)})`);
+        log(`Visual Euler: (${visualEuler.x.toFixed(3)}, ${visualEuler.y.toFixed(3)}, ${visualEuler.z.toFixed(3)})`);
+        
 
         // Material properties
-        console.group('🧪 Material Properties');
+        log('🧪 Material Properties');
         const material = this.diceBody.material;
         if (material) {
-            console.log(`Friction: ${material.friction}`);
-            console.log(`Restitution: ${material.restitution}`);
+            log(`Friction: ${material.friction}`);
+            log(`Restitution: ${material.restitution}`);
         }
-        console.log(`Linear Damping: ${this.diceBody.linearDamping}`);
-        console.log(`Angular Damping: ${this.diceBody.angularDamping}`);
-        console.groupEnd();
+        log(`Linear Damping: ${this.diceBody.linearDamping}`);
+        log(`Angular Damping: ${this.diceBody.angularDamping}`);
+        
 
         // State flags
-        console.group('🏃 State Flags');
-        console.log(`Is Rolling: ${this.isRolling}`);
-        console.log(`Is Dragging: ${this.isDragging}`);
-        console.log(`Showing Result: ${this.showingResult}`);
-        console.groupEnd();
+        log('🏃 State Flags');
+        log(`Is Rolling: ${this.isRolling}`);
+        log(`Is Dragging: ${this.isDragging}`);
+        log(`Showing Result: ${this.showingResult}`);
+        
 
         // Face detection distances (for debugging face detection accuracy)
-        console.group('📊 Face Detection Analysis');
+        log('📊 Face Detection Analysis');
         this.debugFaceDetectionDistances();
-        console.groupEnd();
+        
 
-        console.groupEnd();
+        
     }
 
     private debugFaceDetectionDistances(): void {
@@ -2958,7 +3375,7 @@ export class D20Dice {
         // Sort by distance (closest first)
         distances.sort((a, b) => a.distance - b.distance);
 
-        console.log('Current rotation vs all calibrated face rotations:');
+        log('Current rotation vs all calibrated face rotations:');
         console.table(distances.map(d => ({
             Face: d.face,
             Distance: parseFloat(d.distance.toFixed(3)),
@@ -2967,19 +3384,19 @@ export class D20Dice {
             'Target Euler Z': faceRotations[d.face].z.toFixed(2)
         })));
 
-        console.log('🏆 TOP 5 CLOSEST MATCHES:');
+        log('🏆 TOP 5 CLOSEST MATCHES:');
         for (let i = 0; i < Math.min(5, distances.length); i++) {
             const { face, distance } = distances[i];
             const targetEuler = faceRotations[face];
-            console.log(`${i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : i === 3 ? '4️⃣' : '5️⃣'} Face ${face}: distance ${distance.toFixed(3)}`);
-            console.log(`   Target: (${targetEuler.x.toFixed(2)}, ${targetEuler.y.toFixed(2)}, ${targetEuler.z.toFixed(2)})`);
-            console.log(`   Current: (${currentRotation.x.toFixed(2)}, ${currentRotation.y.toFixed(2)}, ${currentRotation.z.toFixed(2)})`);
+            log(`${i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : i === 3 ? '4️⃣' : '5️⃣'} Face ${face}: distance ${distance.toFixed(3)}`);
+            log(`   Target: (${targetEuler.x.toFixed(2)}, ${targetEuler.y.toFixed(2)}, ${targetEuler.z.toFixed(2)})`);
+            log(`   Current: (${currentRotation.x.toFixed(2)}, ${currentRotation.y.toFixed(2)}, ${currentRotation.z.toFixed(2)})`);
 
             const dx = this.normalizeAngle(currentRotation.x - targetEuler.x);
             const dy = this.normalizeAngle(currentRotation.y - targetEuler.y);
             const dz = this.normalizeAngle(currentRotation.z - targetEuler.z);
-            console.log(`   Diff: (${dx.toFixed(2)}, ${dy.toFixed(2)}, ${dz.toFixed(2)})`);
-            console.log('');
+            log(`   Diff: (${dx.toFixed(2)}, ${dy.toFixed(2)}, ${dz.toFixed(2)})`);
+            log('');
         }
     }
 
@@ -3057,19 +3474,19 @@ export class D20Dice {
 
             // Debug logging
             const directionName = this.settings.diceType === 'd4' ? 'DOWN' : 'UP';
-            console.log('🎯 Face Normal Detection Results:');
-            console.log(`Detection vector (${directionName}): (${detectionVector.x}, ${detectionVector.y}, ${detectionVector.z})`);
-            console.log(`Tolerance: ${tolerance} (min dot product: ${minDotProduct.toFixed(3)})`);
-            console.log(`Best face: ${bestFace} (dot product: ${bestDotProduct.toFixed(3)})`);
+            log('🎯 Face Normal Detection Results:');
+            log(`Detection vector (${directionName}): (${detectionVector.x}, ${detectionVector.y}, ${detectionVector.z})`);
+            log(`Tolerance: ${tolerance} (min dot product: ${minDotProduct.toFixed(3)})`);
+            log(`Best face: ${bestFace} (dot product: ${bestDotProduct.toFixed(3)})`);
 
             // Log top 5 candidates
-            console.log('🏆 TOP 5 FACE CANDIDATES:');
+            log('🏆 TOP 5 FACE CANDIDATES:');
             for (let i = 0; i < Math.min(5, detectionResults.length); i++) {
                 const result = detectionResults[i];
                 const emoji = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : i === 3 ? '4️⃣' : '5️⃣';
                 const isDetected = result.dotProduct >= minDotProduct ? `✅ ${directionName}` : '❌';
-                console.log(`${emoji} Face ${result.face}: dot=${result.dotProduct.toFixed(3)} ${isDetected}`);
-                console.log(`   World normal: (${result.worldNormal.x.toFixed(3)}, ${result.worldNormal.y.toFixed(3)}, ${result.worldNormal.z.toFixed(3)})`);
+                log(`${emoji} Face ${result.face}: dot=${result.dotProduct.toFixed(3)} ${isDetected}`);
+                log(`   World normal: (${result.worldNormal.x.toFixed(3)}, ${result.worldNormal.y.toFixed(3)}, ${result.worldNormal.z.toFixed(3)})`);
             }
 
             // Warn if no face is clearly detected
@@ -3206,8 +3623,9 @@ export class D20Dice {
         // Force renderer to exactly match the provided dimensions
         this.renderer.setSize(width, height, true);
 
-        // Update pixel ratio for crisp rendering
-        this.renderer.setPixelRatio(window.devicePixelRatio);
+        // Uncapped devicePixelRatio means nine times the fragments on a 3x
+        // display for dice about a hundred pixels across.
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 
         // Set canvas to fill container completely without any constraints
         const canvas = this.renderer.domElement;
@@ -3228,6 +3646,9 @@ export class D20Dice {
 
         // Update the camera projection matrix for orthographic camera
         this.camera.updateProjectionMatrix();
+
+        this.cachedRect = null;
+        this.wake();
     }
 
     private reinitializeAfterContextLoss() {
@@ -3235,7 +3656,7 @@ export class D20Dice {
             // Recreate the scene elements
             this.createDiceTray();
             this.setupLighting();
-            console.log('Scene reinitialized after WebGL context restore');
+            this.wake();
         } catch (error) {
             console.error('Failed to reinitialize scene after context loss:', error);
         }
@@ -3265,12 +3686,8 @@ export class D20Dice {
     }
 
     public updateSettings(newSettings: DiceSettings) {
-        console.log('🔧 D20Dice settings updated:', {
-            oldMotionThreshold: this.settings.motionThreshold,
-            newMotionThreshold: newSettings.motionThreshold,
-            oldResultAnimation: this.settings.enableResultAnimation,
-            newResultAnimation: newSettings.enableResultAnimation
-        });
+        const trayResized = this.settings.trayWidth !== newSettings.trayWidth ||
+            this.settings.trayLength !== newSettings.trayLength;
         this.settings = newSettings;
 
         // Update window border
@@ -3292,23 +3709,34 @@ export class D20Dice {
         // Note: In multi-dice system, individual dice settings are handled when created
         // No need to recreate all dice on settings change
 
-        // Update tray
-        if (this.trayMesh) {
-            this.scene.remove(this.trayMesh);
-            this.trayMesh = null;
-        }
+        // Update tray (createDiceTray removes the previous one)
         this.createDiceTray();
 
         // Update renderer shadow settings
         this.renderer.shadowMap.enabled = this.settings.enableShadows;
 
-        // Update lighting
+        // Update lighting (this also refits the shadow camera to the tray)
         this.setupLighting();
+
+        // Moving the walls under sleeping dice can leave one outside the tray,
+        // and a sleeping body will never notice. Only the tray size can do that,
+        // so the other settings do not disturb dice that have already settled.
+        if (trayResized) {
+            for (const body of this.diceBodyArray) body?.wakeUp();
+        }
+
+        this.wake();
     }
 
     public destroy() {
-        if (this.animationId) {
+        this.isViewActive = false;
+        // destroy() deliberately drops the WebGL context below; without this the
+        // context-lost handler reports our own teardown as a fault.
+        this.isTearingDown = true;
+
+        if (this.animationId !== null) {
             cancelAnimationFrame(this.animationId);
+            this.animationId = null;
         }
 
         if (this.rollTimeout) {
@@ -3339,13 +3767,37 @@ export class D20Dice {
         }
 
         if (this.scene) {
+            // scene.clear() only detaches — geometries, materials and the
+            // megabyte-sized face textures stay resident on the GPU otherwise.
+            this.scene.traverse((object) => {
+                const mesh = object as THREE.Mesh;
+                if (!mesh.isMesh) return;
+                mesh.geometry?.dispose();
+                const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+                for (const material of materials) {
+                    if (!material) continue;
+                    const phong = material as THREE.MeshPhongMaterial;
+                    phong.map?.dispose();
+                    phong.normalMap?.dispose();
+                    material.dispose();
+                }
+            });
+            this.originalMaterials.forEach((material) => {
+                const list = Array.isArray(material) ? material : [material];
+                for (const entry of list) entry?.dispose();
+            });
+            this.originalMaterials.clear();
+            this.textureCache.clear();
+            this.removeShadowCatcher();
             this.scene.clear();
         }
 
         if (this.world) {
-            this.world.bodies.forEach(body => {
-                this.world.removeBody(body);
-            });
+            // removeBody() splices world.bodies, so iterating it forwards skips
+            // every second body.
+            for (let i = this.world.bodies.length - 1; i >= 0; i--) {
+                this.world.removeBody(this.world.bodies[i]);
+            }
         }
     }
 
@@ -3361,7 +3813,7 @@ export class D20Dice {
             return false;
         }
 
-        console.log(`🎯 AUTO-CALIBRATING Face ${faceNumber}`);
+        log(`🎯 AUTO-CALIBRATING Face ${faceNumber}`);
 
         // Find which face is currently pointing most upward
         const upVector = new THREE.Vector3(0, 1, 0);
@@ -3382,15 +3834,15 @@ export class D20Dice {
             }
         }
 
-        console.log(`Current upward-facing geometry face index: ${bestFaceIndex}`);
-        console.log(`Dot product with up vector: ${bestDotProduct.toFixed(3)}`);
-        console.log(`Mapping face index ${bestFaceIndex} to number ${faceNumber}`);
+        log(`Current upward-facing geometry face index: ${bestFaceIndex}`);
+        log(`Dot product with up vector: ${bestDotProduct.toFixed(3)}`);
+        log(`Mapping face index ${bestFaceIndex} to number ${faceNumber}`);
 
         // Update the face mapping immediately
         this.settings.faceMapping[bestFaceIndex] = faceNumber;
 
-        console.log(`✅ Face ${faceNumber} calibrated! Geometry face ${bestFaceIndex} now maps to ${faceNumber}`);
-        console.log('Updated face mapping:', this.settings.faceMapping);
+        log(`✅ Face ${faceNumber} calibrated! Geometry face ${bestFaceIndex} now maps to ${faceNumber}`);
+        log('Updated face mapping:', this.settings.faceMapping);
 
         // Trigger a settings save through the plugin
         if (this.onCalibrationChanged) {
@@ -3410,15 +3862,11 @@ export class D20Dice {
         if (enabled) {
             // Enable clickthrough - make canvas non-interactive
             canvas.style.pointerEvents = 'none';
-            canvas.style.cursor = 'default';
+            this.setCursor('default');
         } else {
             // Disable clickthrough - make canvas interactive
             canvas.style.pointerEvents = 'auto';
-            if (this.isHoveringDice) {
-                canvas.style.cursor = 'grab';
-            } else {
-                canvas.style.cursor = 'default';
-            }
+            this.setCursor(this.isHoveringDice ? 'grab' : 'default');
         }
     }
 
@@ -3445,7 +3893,7 @@ export class D20Dice {
                     return;
                 }
 
-                console.log(`🎲 Starting enhanced roll with ${this.diceArray.length} dice`);
+                log(`🎲 Starting enhanced roll with ${this.diceArray.length} dice`);
 
                 // Initialize dice states
                 this.initializeDiceStates();
@@ -3477,12 +3925,16 @@ export class D20Dice {
                 stableTime: 0
             });
         }
-        console.log(`🎯 Initialized ${this.diceStates.length} dice states`);
+        log(`🎯 Initialized ${this.diceStates.length} dice states`);
     }
 
     private applyRollForces() {
         this.diceBodyArray.forEach((body, index) => {
             if (body) {
+                // A sleeping body ignores impulses and velocity writes until it
+                // is woken explicitly — without this a second roll never starts.
+                body.wakeUp();
+
                 // Reset position to prevent stacking
                 const spread = Math.min(this.diceArray.length * 0.3, 4);
                 const angle = (index / this.diceArray.length) * Math.PI * 2;
@@ -3519,10 +3971,9 @@ export class D20Dice {
                     (Math.random() - 0.5) * 20
                 );
                 body.applyTorque(torque);
-
-                console.log(`🎲 Applied force to dice ${index}: force=${force.length().toFixed(2)}, torque=${torque.length().toFixed(2)}`);
             }
         });
+        this.wake();
     }
 
     private startIndividualDiceMonitoring(resolve: (value: string) => void, reject: (reason?: any) => void) {
@@ -3534,7 +3985,7 @@ export class D20Dice {
             try {
                 // Early exit if view is no longer active
                 if (!this.isViewActive) {
-                    console.log('🛑 Monitoring stopped - view is no longer active');
+                    log('🛑 Monitoring stopped - view is no longer active');
                     this.currentMonitor = null;
                     this.diceStates = [];
                     return;
@@ -3573,7 +4024,7 @@ export class D20Dice {
                                             state.isCaught = true;
                                             state.isRolling = false;
                                             state.result = null;
-                                            console.log(`🥅 Dice ${i} (${state.type}) CAUGHT! Face confidence: ${checkResult.confidence.toFixed(3)}, required: ${checkResult.requiredConfidence.toFixed(3)}`);
+                                            log(`🥅 Dice ${i} (${state.type}) CAUGHT! Face confidence: ${checkResult.confidence.toFixed(3)}, required: ${checkResult.requiredConfidence.toFixed(3)}`);
                                         }
                                         // Update lastMotion to prevent rapid re-checking
                                         state.lastMotion = now;
@@ -3581,9 +4032,9 @@ export class D20Dice {
                                         // Face detection succeeded - HIGHLIGHT the completed dice
                                         if (state.isCaught) {
                                             // Was caught but now valid - clear caught state and highlight as complete
-                                            console.log(`✅ Dice ${i} (${state.type}) was caught but has now settled with result: ${checkResult.result}`);
+                                            log(`✅ Dice ${i} (${state.type}) was caught but has now settled with result: ${checkResult.result}`);
                                         } else {
-                                            console.log(`✅ Dice ${i} (${state.type}) settled with result: ${checkResult.result}`);
+                                            log(`✅ Dice ${i} (${state.type}) settled with result: ${checkResult.result}`);
                                         }
                                         state.result = checkResult.result;
                                         state.isComplete = true;
@@ -3601,14 +4052,14 @@ export class D20Dice {
 
                             // If dice was marked as caught but is moving again, give it another chance
                             if (state.isCaught) {
-                                console.log(`🔄 Dice ${i} was caught but is moving again - clearing caught state`);
+                                log(`🔄 Dice ${i} was caught but is moving again - clearing caught state`);
                                 state.isCaught = false;
                                 state.isRolling = true;
                             }
 
                             // If dice was completed but is moving again, remove highlight
                             if (state.isComplete) {
-                                console.log(`🔄 Dice ${i} was complete but is moving again - clearing highlight`);
+                                log(`🔄 Dice ${i} was complete but is moving again - clearing highlight`);
                                 state.isComplete = false;
                                 state.isRolling = true;
                                 this.highlightCaughtDice(i, false);
@@ -3628,22 +4079,15 @@ export class D20Dice {
 
                 statusUpdate = `Rolling: ${rolling}, Caught: ${caught}, Complete: ${completed}/${this.diceStates.length}`;
 
-                // Only log status occasionally to avoid spam
-                if (Math.random() < 0.1) {
-                    console.log(`🎯 Status - ${statusUpdate}`);
-                }
 
                 // If there are caught dice, DON'T show results yet - wait for reroll
                 if (caught > 0 && rolling === 0) {
                     // All dice have settled, but some are caught - wait for user to reroll
-                    if (completed > 0 && Math.random() < 0.05) {
-                        console.log(`⏸️ Waiting for reroll - ${caught} dice caught, ${completed} dice valid`);
-                    }
                     // Continue monitoring but don't resolve (only if view is still active)
                     if (this.isViewActive) {
                         setTimeout(monitor, checkInterval);
                     } else {
-                        console.log('🛑 Monitoring stopped - view is no longer active');
+                        log('🛑 Monitoring stopped - view is no longer active');
                         this.currentMonitor = null;
                         this.diceStates = [];
                     }
@@ -3661,7 +4105,7 @@ export class D20Dice {
                         .join(' + ');
 
                     const resultString = `${breakdown} = ${total}`;
-                    console.log(`🏆 All dice complete! Result: ${resultString}`);
+                    log(`🏆 All dice complete! Result: ${resultString}`);
 
                     // Clear monitoring state
                     this.currentMonitor = null;
@@ -3673,7 +4117,7 @@ export class D20Dice {
 
                 // Check for timeout
                 if (now - startTime > maxWaitTime) {
-                    console.log(`⏰ Roll timeout after ${maxWaitTime/1000}s`);
+                    log(`⏰ Roll timeout after ${maxWaitTime/1000}s`);
                     // Force completion with current results
                     const partialResults = this.diceStates.map((state, i) => {
                         if (state.result !== null) {
@@ -3703,7 +4147,7 @@ export class D20Dice {
                 if (this.isViewActive) {
                     setTimeout(monitor, checkInterval);
                 } else {
-                    console.log('🛑 Monitoring stopped - view is no longer active');
+                    log('🛑 Monitoring stopped - view is no longer active');
                     this.currentMonitor = null;
                     this.diceStates = [];
                 }
@@ -3729,11 +4173,11 @@ export class D20Dice {
         const caughtDice = this.diceStates.filter(d => d.isCaught && !d.isComplete);
 
         if (caughtDice.length === 0) {
-            console.log('No caught dice to reroll');
+            log('No caught dice to reroll');
             return false;
         }
 
-        console.log(`🎲 Rerolling ${caughtDice.length} caught dice`);
+        log(`🎲 Rerolling ${caughtDice.length} caught dice`);
 
         caughtDice.forEach(state => {
             const body = this.diceBodyArray[state.index];
@@ -3748,6 +4192,7 @@ export class D20Dice {
                 state.lastMotion = Date.now();
 
                 // Apply new force to caught dice - ensure they fall down
+                body.wakeUp();
                 const forceMultiplier = 10 + Math.random() * 8;
                 const force = new CANNON.Vec3(
                     (Math.random() - 0.5) * forceMultiplier,
@@ -3756,10 +4201,11 @@ export class D20Dice {
                 );
                 body.applyImpulse(force);
 
-                console.log(`🔄 Rerolled dice ${state.index} with force ${force.length().toFixed(2)}`);
+                log(`🔄 Rerolled dice ${state.index} with force ${force.length().toFixed(2)}`);
             }
         });
 
+        this.wake();
         return true;
     }
 
@@ -3794,17 +4240,23 @@ export class D20Dice {
             highlightedMaterial.emissive.setHex(colorHex);
             highlightedMaterial.emissiveIntensity = 0.8;
             dice.material = highlightedMaterial;
-
-            console.log(`🔆 Highlighted completed dice ${index}`);
         } else {
             // Restore original material
             const originalMaterial = this.originalMaterials.get(index);
             if (originalMaterial) {
+                // The highlight is a clone; dropping the reference without
+                // disposing leaks its GPU program.
+                const clone = dice.material;
                 dice.material = originalMaterial;
+                if (clone !== originalMaterial && !Array.isArray(clone)) {
+                    clone.dispose();
+                }
                 this.originalMaterials.delete(index);
-                console.log(`🔅 Removed highlight from dice ${index}`);
             }
         }
+        // The monitor can swap materials long after everything has gone to
+        // sleep; without a wake the change never reaches the screen.
+        this.wake();
     }
 
     // Clear all highlights
@@ -3816,7 +4268,7 @@ export class D20Dice {
             }
         });
         this.originalMaterials.clear();
-        console.log('🔅 Cleared all dice highlights');
+        log('🔅 Cleared all dice highlights');
     }
 }
 

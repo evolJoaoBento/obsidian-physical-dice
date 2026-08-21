@@ -447,3 +447,115 @@
     border-left-color: var(--color-green) !important;
 }
 
+
+/* ---------------------------------------------------------------------------
+   Controls panel widgets. These used to be built with element.style.cssText in
+   main.ts, which meant re-applying a stylesheet from script on every rebuild of
+   the panel and no way for a theme to override any of it.
+   --------------------------------------------------------------------------- */
+
+.dice-controls-panel .dice-section {
+    border-top: 1px solid var(--background-modifier-border);
+    margin-top: 5px;
+    padding-top: 5px;
+}
+
+.dice-controls-panel .dice-status-display {
+    margin: 5px 0;
+    padding: 8px;
+    background: var(--background-primary);
+    border-radius: 4px;
+    font-size: 12px;
+    max-height: 150px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+}
+
+.dice-controls-panel .dice-reroll-button {
+    width: 100%;
+    padding: 6px;
+    font-size: 12px;
+    background: var(--color-orange);
+    color: white;
+    border: 1px solid var(--color-orange);
+    border-radius: 4px;
+    margin: 3px 0;
+}
+
+.dice-controls-panel .dice-count-display {
+    margin-bottom: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.dice-controls-panel .dice-type-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    margin-bottom: 8px;
+}
+
+.dice-controls-panel .dice-type-button {
+    padding: 6px 4px;
+    font-size: 11px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--background-primary);
+    color: var(--text-normal);
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+
+.dice-controls-panel .dice-type-button:hover {
+    background: var(--background-modifier-hover);
+}
+
+.dice-controls-panel .dice-type-button.is-at-limit,
+.dice-controls-panel .dice-type-button.is-at-limit:hover {
+    background: var(--background-modifier-error);
+}
+
+.dice-controls-panel .dice-clear-button {
+    width: 100%;
+    padding: 6px;
+    font-size: 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--background-modifier-error);
+    color: white;
+    cursor: pointer;
+}
+
+.dice-controls-panel .dice-clickthrough-button {
+    width: 100%;
+    padding: 12px;
+    font-size: 14px;
+    font-weight: bold;
+    border: 2px solid var(--interactive-accent);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.2s ease;
+    background: var(--background-primary);
+    color: var(--text-normal);
+}
+
+.dice-controls-panel .dice-clickthrough-button.is-active {
+    background: var(--interactive-accent);
+    color: white;
+}
+
+.dice-controls-panel .dice-result-overlay.show {
+    cursor: pointer;
+}
+
+/* Shown in place of the canvas when WebGL is unavailable. */
+.dice-render-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 4px;
+    color: var(--text-muted);
+    text-align: center;
+}

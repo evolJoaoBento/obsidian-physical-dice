@@ -1,4 +1,4 @@
-import { Plugin, Notice, WorkspaceLeaf } from 'obsidian';
+import { Plugin, Notice, WorkspaceLeaf, debounce, normalizePath } from 'obsidian';
 import { D20Dice } from './d20-dice';
 import { DiceSettings, DEFAULT_SETTINGS, DiceSettingTab } from './settings';
 import { DiceChatView, CHAT_VIEW_TYPE } from './chat-view';
@@ -18,6 +18,18 @@ export default class D20DicePlugin extends Plugin {
 
     // API Integration
     private chatRibbonIcon: HTMLElement | null = null;
+
+    // Everything the overlay registers, so hideDiceOverlay can undo all of it.
+    private overlayCleanups: Array<() => void> = [];
+    private statusInterval: number | null = null;
+
+    // The face textures are base64 PNGs and dominate the settings blob. They
+    // live in their own file so an ordinary settings change does not rewrite
+    // them; this flag says whether that file is known good.
+    private texturesInSidecar = false;
+
+    // Settings changes arrive one per slider tick. Coalesce them.
+    private readonly queueSave = debounce(() => { void this.writeSettings(); }, 500, true);
 
     async onload() {
         await this.loadSettings();
@@ -48,14 +60,18 @@ export default class D20DicePlugin extends Plugin {
             (leaf) => new DiceChatView(leaf, this)
         );
 
-        // Initialize API integration
-        this.refreshApiIntegration();
+        // Initialize API integration. Detaching leaves during onload would undo
+        // the workspace's own restore, so only the ribbon icon is set up here.
+        this.refreshApiIntegration(false);
 
         this.addSettingTab(new DiceSettingTab(this.app, this));
     }
 
     async onunload() {
         this.hideDiceOverlay();
+        // Write straight through: a queued debounce would never fire.
+        this.queueSave.cancel();
+        await this.writeSettings();
     }
 
     private toggleDiceOverlay() {
@@ -80,7 +96,7 @@ export default class D20DicePlugin extends Plugin {
 
         // Add drag handle at the top
         const dragHandle = this.controlsPanel.createDiv('dice-controls-drag-handle');
-        dragHandle.innerHTML = '⋮⋮⋮';
+        dragHandle.setText('⋮⋮⋮');
 
         // Roll button
         const rollButton = this.controlsPanel.createEl('button', {
@@ -93,14 +109,13 @@ export default class D20DicePlugin extends Plugin {
 
         // Dice status display
         const statusElement = this.controlsPanel.createDiv({ cls: 'dice-status-display' });
-        statusElement.style.cssText = 'margin: 5px 0; padding: 8px; background: var(--background-primary); border-radius: 4px; font-size: 12px; max-height: 150px; overflow-y: auto;';
 
         // Reroll caught dice button
         const rerollButton = this.controlsPanel.createEl('button', {
             text: 'Reroll Caught Dice',
             cls: 'dice-reroll-button'
         });
-        rerollButton.style.cssText = 'width: 100%; padding: 6px; font-size: 12px; background: var(--color-orange); color: white; border: 1px solid var(--color-orange); border-radius: 4px; margin: 3px 0; display: none;';
+        rerollButton.hide();
         rerollButton.disabled = true;
 
         // Update roll button text based on dice type
@@ -110,11 +125,9 @@ export default class D20DicePlugin extends Plugin {
         updateRollButtonText('d20');
 
         // Dice Management Section
-        const diceManagementSection = this.controlsPanel.createDiv();
-        diceManagementSection.style.cssText = 'border-top: 1px solid var(--background-modifier-border); margin-top: 5px; padding-top: 5px;';
+        const diceManagementSection = this.controlsPanel.createDiv('dice-section');
 
-        const diceCountDisplay = diceManagementSection.createEl('div');
-        diceCountDisplay.style.cssText = 'margin-bottom: 8px; font-size: 12px; color: var(--text-muted);';
+        const diceCountDisplay = diceManagementSection.createEl('div', { cls: 'dice-count-display' });
 
         const updateDiceCountDisplay = () => {
             const totalDice = Object.values(this.settings.diceCounts).reduce((sum, count) => sum + count, 0);
@@ -127,8 +140,7 @@ export default class D20DicePlugin extends Plugin {
         updateDiceCountDisplay();
 
         // Dice type buttons grid
-        const diceButtonsContainer = diceManagementSection.createDiv();
-        diceButtonsContainer.style.cssText = 'display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-bottom: 8px;';
+        const diceButtonsContainer = diceManagementSection.createDiv('dice-type-grid');
 
         const diceTypes = [
             { key: 'd4', name: 'D4' },
@@ -140,34 +152,19 @@ export default class D20DicePlugin extends Plugin {
         ];
 
         diceTypes.forEach(dice => {
-            const button = diceButtonsContainer.createEl('button', { text: `+${dice.name}` });
-            button.style.cssText = `
-                padding: 6px 4px;
-                font-size: 11px;
-                border: 1px solid var(--background-modifier-border);
-                border-radius: 4px;
-                background: var(--background-primary);
-                color: var(--text-normal);
-                cursor: pointer;
-                transition: all 0.2s ease;
-            `;
-
-            button.addEventListener('mouseover', () => {
-                button.style.background = 'var(--background-modifier-hover)';
-            });
-
-            button.addEventListener('mouseout', () => {
-                button.style.background = 'var(--background-primary)';
+            const button = diceButtonsContainer.createEl('button', {
+                text: `+${dice.name}`,
+                cls: 'dice-type-button'
             });
 
             button.addEventListener('click', async () => {
                 const totalDice = Object.values(this.settings.diceCounts).reduce((sum, count) => sum + count, 0);
                 if (totalDice >= 50) {
                     button.textContent = 'Max 50!';
-                    button.style.background = 'var(--background-modifier-error)';
+                    button.addClass('is-at-limit');
                     setTimeout(() => {
                         button.textContent = `+${dice.name}`;
-                        button.style.background = 'var(--background-primary)';
+                        button.removeClass('is-at-limit');
                     }, 1500);
                     return;
                 }
@@ -186,18 +183,10 @@ export default class D20DicePlugin extends Plugin {
         });
 
         // Clear all button
-        const clearButton = diceManagementSection.createEl('button', { text: 'Clear All Dice' });
-        clearButton.style.cssText = `
-            width: 100%;
-            padding: 6px;
-            font-size: 12px;
-            border: 1px solid var(--background-modifier-border);
-            border-radius: 4px;
-            background: var(--background-modifier-error);
-            color: white;
-            cursor: pointer;
-            transition: all 0.2s ease;
-        `;
+        const clearButton = diceManagementSection.createEl('button', {
+            text: 'Clear All Dice',
+            cls: 'dice-clear-button'
+        });
 
         clearButton.addEventListener('click', async () => {
             Object.keys(this.settings.diceCounts).forEach(key => {
@@ -215,22 +204,12 @@ export default class D20DicePlugin extends Plugin {
         });
 
         // Clickthrough button section
-        const clickthroughSection = this.controlsPanel.createDiv();
-        clickthroughSection.style.cssText = 'border-top: 1px solid var(--background-modifier-border); margin-top: 5px; padding-top: 5px;';
+        const clickthroughSection = this.controlsPanel.createDiv('dice-section');
 
-        const clickthroughButton = clickthroughSection.createEl('button', { text: 'Clickthrough: ON' });
-        clickthroughButton.style.cssText = `
-            width: 100%;
-            padding: 12px;
-            font-size: 14px;
-            font-weight: bold;
-            border: 2px solid var(--interactive-accent);
-            border-radius: 6px;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            background: var(--interactive-accent);
-            color: white;
-        `;
+        const clickthroughButton = clickthroughSection.createEl('button', {
+            text: 'Clickthrough: ON',
+            cls: 'dice-clickthrough-button'
+        });
 
         const updateClickthrough = (enabled: boolean) => {
             this.clickthroughState = enabled;
@@ -238,15 +217,8 @@ export default class D20DicePlugin extends Plugin {
                 // Pass the clickthrough state to the dice component
                 this.dice.setClickthroughMode(enabled);
             }
-            if (enabled) {
-                clickthroughButton.textContent = 'Clickthrough: ON';
-                clickthroughButton.style.background = 'var(--interactive-accent)';
-                clickthroughButton.style.color = 'white';
-            } else {
-                clickthroughButton.textContent = 'Clickthrough: OFF';
-                clickthroughButton.style.background = 'var(--background-primary)';
-                clickthroughButton.style.color = 'var(--text-normal)';
-            }
+            clickthroughButton.textContent = enabled ? 'Clickthrough: ON' : 'Clickthrough: OFF';
+            clickthroughButton.toggleClass('is-active', enabled);
         };
 
         // Store the callbacks for external access
@@ -297,11 +269,11 @@ export default class D20DicePlugin extends Plugin {
             this.handleRollComplete(result);
         };
 
-        // Set up dice status monitoring
-        let statusInterval: NodeJS.Timeout | null = null;
+        // Set up dice status monitoring. The handle lives on the plugin so that
+        // closing the overlay mid-roll stops the poll.
         const startStatusMonitoring = () => {
-            if (statusInterval) return;
-            statusInterval = setInterval(() => {
+            if (this.statusInterval !== null) return;
+            this.statusInterval = window.setInterval(() => {
                 if (this.dice) {
                     const status = this.dice.getDiceStatus();
                     this.updateDiceStatusDisplay(status, statusElement, rerollButton);
@@ -310,9 +282,9 @@ export default class D20DicePlugin extends Plugin {
         };
 
         const stopStatusMonitoring = () => {
-            if (statusInterval) {
-                clearInterval(statusInterval);
-                statusInterval = null;
+            if (this.statusInterval !== null) {
+                window.clearInterval(this.statusInterval);
+                this.statusInterval = null;
             }
         };
 
@@ -344,7 +316,7 @@ export default class D20DicePlugin extends Plugin {
                 this.showResult(result, resultElement);
                 this.handleRollComplete(result);
                 statusElement.textContent = 'Roll complete!';
-                rerollButton.style.display = 'none';
+                rerollButton.hide();
 
                 // Stop monitoring after completion
                 setTimeout(() => {
@@ -369,22 +341,21 @@ export default class D20DicePlugin extends Plugin {
         this.isVisible = true;
 
         // Handle window resize with debouncing
-        let resizeTimeout: NodeJS.Timeout;
-        const resizeHandler = () => {
-            clearTimeout(resizeTimeout);
-            resizeTimeout = setTimeout(() => {
-                this.updateOverlaySize();
-            }, 100);
-        };
+        const resizeHandler = debounce(() => this.updateOverlaySize(), 100, true);
         window.addEventListener('resize', resizeHandler);
-
-        // Also listen for Obsidian layout changes
-        this.app.workspace.on('layout-change', () => {
-            setTimeout(() => this.updateOverlaySize(), 100);
+        this.overlayCleanups.push(() => {
+            resizeHandler.cancel();
+            window.removeEventListener('resize', resizeHandler);
         });
 
+        // Also listen for Obsidian layout changes
+        const layoutRef = this.app.workspace.on('layout-change', () => {
+            window.setTimeout(() => this.updateOverlaySize(), 100);
+        });
+        this.overlayCleanups.push(() => this.app.workspace.offref(layoutRef));
+
         // Initial sizing
-        setTimeout(() => this.updateOverlaySize(), 50);
+        window.setTimeout(() => this.updateOverlaySize(), 50);
     }
 
     private setupControlsDragging(dragHandle: HTMLElement) {
@@ -397,7 +368,9 @@ export default class D20DicePlugin extends Plugin {
             e.preventDefault();
         });
 
-        document.addEventListener('mousemove', (e) => {
+        // These sit on document, so they outlive the overlay unless removed —
+        // reopening it used to stack another pair every time.
+        const onMove = (e: MouseEvent) => {
             if (this.isDraggingControls && this.controlsPanel) {
                 const x = e.clientX - this.controlsDragOffset.x;
                 const y = e.clientY - this.controlsDragOffset.y;
@@ -409,15 +382,20 @@ export default class D20DicePlugin extends Plugin {
                 this.controlsPanel.style.left = `${Math.max(0, Math.min(x, maxX))}px`;
                 this.controlsPanel.style.top = `${Math.max(44, Math.min(y, maxY))}px`; // 44px for ribbon
             }
-        });
+        };
 
-        document.addEventListener('mouseup', () => {
+        const onUp = () => {
             if (this.isDraggingControls) {
                 this.isDraggingControls = false;
-                if (dragHandle) {
-                    dragHandle.style.cursor = 'grab';
-                }
+                dragHandle.style.cursor = 'grab';
             }
+        };
+
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        this.overlayCleanups.push(() => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
         });
     }
 
@@ -426,7 +404,6 @@ export default class D20DicePlugin extends Plugin {
         resultElement.textContent = copyableText;
         resultElement.className = 'dice-result-overlay show';
         resultElement.title = 'Click to copy result';
-        resultElement.style.cursor = 'pointer';
 
         // Make result clickable to copy
         resultElement.onclick = () => {
@@ -477,6 +454,14 @@ export default class D20DicePlugin extends Plugin {
     }
 
     private hideDiceOverlay() {
+        for (const cleanup of this.overlayCleanups) cleanup();
+        this.overlayCleanups = [];
+
+        if (this.statusInterval !== null) {
+            window.clearInterval(this.statusInterval);
+            this.statusInterval = null;
+        }
+
         if (this.diceOverlay) {
             if (this.dice) {
                 // Stop all monitoring/animation loops immediately
@@ -502,18 +487,103 @@ export default class D20DicePlugin extends Plugin {
         this.updateClickthroughCallback = null;
         this.updateRollButtonTextCallback = null;
         this.updateDiceCountDisplayCallback = null;
-        window.removeEventListener('resize', () => this.updateOverlaySize());
+    }
+
+    private get texturePath(): string {
+        return normalizePath(`${this.manifest.dir}/textures.json`);
     }
 
     async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        const stored = (await this.loadData()) ?? {};
+        // Object.assign is shallow, so without cloning the nested objects a
+        // fresh vault ends up mutating DEFAULT_SETTINGS itself — dice counts and
+        // textures are written in place all over the plugin.
+        // Shadow-map settings that no longer exist. Dropping them here stops
+        // them being carried straight back out to data.json on the next save.
+        delete stored.diceCastShadow;
+        delete stored.diceReceiveShadow;
+        delete stored.surfaceReceiveShadow;
+
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, stored, {
+            diceCounts: Object.assign({}, DEFAULT_SETTINGS.diceCounts, stored.diceCounts),
+            diceScales: Object.assign({}, DEFAULT_SETTINGS.diceScales, stored.diceScales),
+            diceTextures: Object.assign({}, DEFAULT_SETTINGS.diceTextures, stored.diceTextures),
+            diceNormalMaps: Object.assign({}, DEFAULT_SETTINGS.diceNormalMaps, stored.diceNormalMaps),
+            faceMapping: Object.assign({}, DEFAULT_SETTINGS.faceMapping, stored.faceMapping)
+        });
+
+        const sidecar = await this.readTextures();
+        if (sidecar) {
+            this.texturesInSidecar = true;
+            Object.assign(this.settings.diceTextures, sidecar.diceTextures ?? {});
+            Object.assign(this.settings.diceNormalMaps, sidecar.diceNormalMaps ?? {});
+        } else if (this.hasTextureData()) {
+            // First run after the split: move what is already in data.json out.
+            await this.saveTextures();
+        }
     }
 
+    private hasTextureData(): boolean {
+        const all = [
+            ...Object.values(this.settings.diceTextures ?? {}),
+            ...Object.values(this.settings.diceNormalMaps ?? {})
+        ];
+        return all.some((value) => typeof value === 'string' && value.length > 0);
+    }
+
+    private async readTextures(): Promise<{ diceTextures?: any; diceNormalMaps?: any } | null> {
+        try {
+            if (!(await this.app.vault.adapter.exists(this.texturePath))) return null;
+            return JSON.parse(await this.app.vault.adapter.read(this.texturePath));
+        } catch (error) {
+            console.error('Dice: could not read textures.json, falling back to data.json', error);
+            return null;
+        }
+    }
+
+    /**
+     * Write the face textures to their own file. Only once that has succeeded
+     * are they dropped from data.json, so a failure here costs nothing.
+     */
+    async saveTextures(): Promise<void> {
+        try {
+            await this.app.vault.adapter.write(this.texturePath, JSON.stringify({
+                diceTextures: this.settings.diceTextures,
+                diceNormalMaps: this.settings.diceNormalMaps
+            }));
+            this.texturesInSidecar = await this.app.vault.adapter.exists(this.texturePath);
+        } catch (error) {
+            console.error('Dice: could not write textures.json, keeping textures in data.json', error);
+            this.texturesInSidecar = false;
+        }
+        await this.writeSettings();
+    }
+
+    private async writeSettings(): Promise<void> {
+        if (!this.settings) return;
+        const payload: Record<string, unknown> = Object.assign({}, this.settings) as unknown as Record<string, unknown>;
+        if (this.texturesInSidecar) {
+            delete payload.diceTextures;
+            delete payload.diceNormalMaps;
+        }
+        await this.saveData(payload);
+    }
+
+    /**
+     * Settings changes arrive one per slider tick and the payload used to carry
+     * a megabyte of base64, so writes are coalesced. Use saveTextures() when the
+     * texture data itself changed.
+     */
     async saveSettings() {
-        await this.saveData(this.settings);
+        this.queueSave();
     }
 
-    refreshDiceView() {
+    /**
+     * Every settings control calls this, and updateSettings() rebuilds the tray
+     * and the lights. Dragging one slider used to do that forty times a second;
+     * a short trailing debounce is imperceptible and does it once.
+     */
+    refreshDiceView = debounce(() => {
         if (this.dice) {
             this.dice.updateSettings(this.settings);
         }
@@ -522,7 +592,7 @@ export default class D20DicePlugin extends Plugin {
         if (this.updateRollButtonTextCallback) {
             this.updateRollButtonTextCallback('d20');
         }
-    }
+    }, 100, true);
 
     toggleClickthrough() {
         if (this.isVisible && this.updateClickthroughCallback) {
@@ -531,7 +601,7 @@ export default class D20DicePlugin extends Plugin {
         }
     }
 
-    refreshApiIntegration() {
+    refreshApiIntegration(closeExistingViews = true) {
         // Remove existing chat ribbon icon if it exists
         if (this.chatRibbonIcon) {
             this.chatRibbonIcon.remove();
@@ -539,7 +609,9 @@ export default class D20DicePlugin extends Plugin {
         }
 
         // Close any open chat views
-        this.app.workspace.detachLeavesOfType(CHAT_VIEW_TYPE);
+        if (closeExistingViews) {
+            this.app.workspace.detachLeavesOfType(CHAT_VIEW_TYPE);
+        }
 
         // Add chat ribbon icon if API is enabled
         if (this.settings.apiEnabled) {
@@ -691,7 +763,7 @@ export default class D20DicePlugin extends Plugin {
     ) {
         if (status.length === 0) {
             statusElement.textContent = '';
-            rerollButton.style.display = 'none';
+            rerollButton.hide();
             return;
         }
 
@@ -725,11 +797,11 @@ export default class D20DicePlugin extends Plugin {
 
         // Show/hide reroll button based on caught dice
         if (caught > 0) {
-            rerollButton.style.display = 'block';
+            rerollButton.show();
             rerollButton.disabled = false;
             rerollButton.textContent = `Reroll ${caught} Caught Dice`;
         } else {
-            rerollButton.style.display = 'none';
+            rerollButton.hide();
         }
     }
 }

@@ -1,11 +1,14 @@
 {
-  "name": "dsix",
+  "name": "obsidian-physical-dice",
   "version": "1.0.0",
-  "description": "A simple 3D d20 dice roller for Obsidian",
+  "description": "3D physical dice roller for Obsidian",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "harness": "node harness/extract-obsidian-css.mjs || true && node esbuild.harness.mjs serve",
+    "harness:build": "node esbuild.harness.mjs",
+    "harness:css": "node harness/extract-obsidian-css.mjs"
   },
   "keywords": [],
   "author": "",
@@ -22,7 +25,6 @@
   },
   "dependencies": {
     "cannon-es": "^0.20.0",
-    "canvas": "^3.2.0",
     "three": "^0.156.1"
   }
 }
