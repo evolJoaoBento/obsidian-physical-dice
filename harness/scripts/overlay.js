@@ -38,8 +38,19 @@ for (const cell of table) {
     g.font = 'bold 44px sans-serif';
     g.textAlign = 'center'; g.textBaseline = 'middle';
     g.fillText(String(cell.number), cx, cy);
-    // Mark corner 0, so a rotation can be read as well as a number.
-    g.fillStyle = '#ffe600';
-    g.beginPath(); g.arc(cell.corners[0][0], cell.corners[0][1], 9, 0, 7); g.fill();
+    if (cell.vertices) {
+        // Corner-read art: label every corner, because that is where the
+        // numbers actually live and the centre says nothing.
+        g.font = 'bold 34px sans-serif';
+        cell.corners.forEach(([x, y], i) => {
+            const toward = 0.72;
+            g.fillStyle = '#ffe600';
+            g.fillText(String(cell.vertices[i]), x + (cx - x) * (1 - toward), y + (cy - y) * (1 - toward));
+        });
+    } else {
+        // Mark corner 0, so a rotation can be read as well as a number.
+        g.fillStyle = '#ffe600';
+        g.beginPath(); g.arc(cell.corners[0][0], cell.corners[0][1], 9, 0, 7); g.fill();
+    }
 }
 return c.toDataURL('image/png');

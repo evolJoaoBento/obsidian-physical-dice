@@ -163,7 +163,11 @@ const FACE_NUMBERS: Record<string, number[]> = {
     // A d10 is numbered 0-9 and opposite faces sum to nine. three.js is not
     // building this one - createD10PolyhedronGeometry is - and it pairs the
     // kites 0-7, 1-8, 2-9, 3-5 and 4-6.
-    d10: [0, 1, 2, 3, 4, 6, 5, 9, 8, 7]
+    d10: [0, 1, 2, 3, 4, 6, 5, 9, 8, 7],
+    // A d4 is read at the corner the resting face leaves out, which is why
+    // the tray looks for this one's downward face. Face k omits corner k+1
+    // by construction, so the table is the identity and stays that way.
+    d4: [1, 2, 3, 4]
 };
 
 /**
@@ -186,6 +190,20 @@ interface AtlasFace {
     corners: Array<[number, number]>;
     turn: number;
     mirror?: boolean;
+    /**
+     * Which numbered corner of the die each corner of this cell is, for art
+     * that is printed per corner rather than per face.
+     *
+     * A d4 has no upward face to read, so it is read at a corner instead, and
+     * every face carries three digits - one by each corner - rather than one in
+     * the middle. Fold the net up and the three digits that meet at a corner all
+     * agree: 1 at the three outer corners of the sheet, and 3, 2 and 4 at the
+     * midpoints. So a corner of the die owns a number, and lining the cell up
+     * means matching corners to corners, not counting turns. Where this is set
+     * `turn` and `mirror` are not consulted; there is nothing left for them to
+     * decide.
+     */
+    vertices?: number[];
 }
 
 /**
@@ -288,6 +306,19 @@ const ATLAS_POLY: Record<string, { size: number; faces: AtlasFace[] }> = {
             { number: 5, corners: [[203, 655], [255, 745], [209, 836], [8, 747]], turn: 0 },
             { number: 8, corners: [[257, 746], [463, 838], [260, 928], [211, 838]], turn: 0 },
             { number: 3, corners: [[208, 839], [255, 931], [209, 1022], [3, 931]], turn: 0 }
+        ]
+    },
+    // A tetrahedron unfolds to one big triangle cut into four. Corner numbers
+    // are read off the sheet: 1 at the three outer corners, and 3, 2 and 4 at
+    // the midpoints, each repeated on all the cells that meet there - which is
+    // the whole point of a corner-read die.
+    d4: {
+        size: 1024,
+        faces: [
+            { number: 1, corners: [[444, 258], [880, 514], [444, 765]], turn: 0, vertices: [3, 2, 4] },
+            { number: 2, corners: [[441, 258], [441, 765], [4, 513]], turn: 0, vertices: [3, 4, 1] },
+            { number: 3, corners: [[885, 514], [885, 1021], [446, 768]], turn: 0, vertices: [2, 1, 4] },
+            { number: 4, corners: [[446, 255], [885, 2], [885, 509]], turn: 0, vertices: [3, 1, 2] }
         ]
     }
 };
@@ -1771,6 +1802,17 @@ export class D20Dice {
 
             const sides = cell.corners.length;
             const base = face * verticesPerFace;
+
+            if (cell.vertices) {
+                const owners = this.cornerNumbersForFace(geometry, face, verticesPerFace, numbers.length);
+                for (let v = 0; v < verticesPerFace; v++) {
+                    const at = cell.vertices.indexOf(owners[v]);
+                    if (at < 0) continue;
+                    const corner = cell.corners[at];
+                    uv.setXY(base + v, corner[0] / atlas.size, 1 - corner[1] / atlas.size);
+                }
+                continue;
+            }
             // A triangle arrives as three vertices in order and needs no work.
             // A pentagon does not: three.js hands a dodecahedron's face over as
             // nine vertices - three triangles cut off a strip, not a fan - so
@@ -1840,6 +1882,47 @@ export class D20Dice {
         const seatFor = new Array<number>(corners.length);
         order.forEach((corner, seat) => { seatFor[corner] = seat; });
         return seatOf.map((corner) => seatFor[corner]);
+    }
+
+    /**
+     * Number every corner of a face, for corner-read art.
+     *
+     * A tetrahedron's face leaves exactly one of the die's four corners out, and
+     * that is the corner you read when the die rests on that face - so the
+     * corner a face omits carries that face's own number. Numbering the corners
+     * that way costs nothing to derive and leaves no choice to make: each
+     * corner's number falls out of which face does not touch it.
+     */
+    private cornerNumbersForFace(
+        geometry: THREE.BufferGeometry,
+        face: number,
+        verticesPerFace: number,
+        faceCount: number
+    ): number[] {
+        const position = geometry.attributes.position;
+        const corners: THREE.Vector3[] = [];
+        const cornerOf: number[] = [];
+
+        for (let v = 0; v < position.count; v++) {
+            const point = new THREE.Vector3().fromBufferAttribute(position, v);
+            let at = corners.findIndex((c) => c.distanceToSquared(point) < 1e-8);
+            if (at < 0) at = corners.push(point) - 1;
+            cornerOf.push(at);
+        }
+
+        const numberOfCorner = new Array<number>(corners.length).fill(0);
+        for (let f = 0; f < faceCount; f++) {
+            const touched = new Set(cornerOf.slice(f * verticesPerFace, (f + 1) * verticesPerFace));
+            for (let c = 0; c < corners.length; c++) {
+                if (!touched.has(c)) numberOfCorner[c] = f + 1;
+            }
+        }
+
+        const out: number[] = [];
+        for (let v = 0; v < verticesPerFace; v++) {
+            out.push(numberOfCorner[cornerOf[face * verticesPerFace + v]]);
+        }
+        return out;
     }
 
     private applyUVMappingForDiceType(geometry: THREE.BufferGeometry, diceType: string): void {
@@ -2626,11 +2709,8 @@ export class D20Dice {
         // Special cases can be handled here
         switch (diceType) {
             case 'd4':
-                // D4 mapping: faces are numbered 1-4
-                // The UV mapping puts faces in a 2x2 grid:
-                // Face 0 (top-left) = 1, Face 1 (top-right) = 2
-                // Face 2 (bottom-left) = 3, Face 3 (bottom-right) = 4
-                return faceIndex + 1;
+                // The same table that placed the art. See FACE_NUMBERS.
+                return FACE_NUMBERS.d4[faceIndex] || 1;
 
             case 'd6':
                 // The same table that placed the art. See FACE_NUMBERS.
