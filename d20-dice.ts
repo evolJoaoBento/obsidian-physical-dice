@@ -46,7 +46,7 @@ const SHADOW_OPACITY = 0.38;
  * every type is exactly what makes blob shadows look wrong.
  */
 const BLOB_RADIUS: Record<string, number> = {
-    d4: 0.46, d6: 0.96, d8: 0.72, d10: 0.67, d12: 0.88, d20: 0.86
+    d4: 0.58, d6: 0.96, d8: 0.72, d10: 0.67, d12: 0.88, d20: 0.86
 };
 
 /**
@@ -79,6 +79,19 @@ const BLOB_SPREAD = 1.25;
 const BLOB_CORE = 0.6;
 
 /**
+ * Types that want a softer gradient than the rest, as their own core fraction.
+ *
+ * A d4 is the smallest die and the only one resting on a triangle, so a disc
+ * with the standard core reads as a hard pad under it rather than as a shadow.
+ * A lower core means the solid centre is smaller and the fade longer - blurrier
+ * at the same overall size. Each distinct value gets its own texture, built
+ * once and shared by every die using it.
+ */
+const BLOB_CORE_BY_TYPE: Record<string, number> = {
+    d4: 0.25
+};
+
+/**
  * How far the blob slides away from the light, as a fraction of its own radius.
  *
  * A disc dead centre under a die reads as a symmetric halo rather than as a
@@ -106,6 +119,64 @@ const BLOB_TEXTURE_SIZE = 128;
 
 /** The physics floor. Everything that claims to be a surface agrees with it. */
 const FLOOR_Y = -2.4;
+
+/**
+ * A cell of a texture pack's atlas: where a number is printed, and which way up.
+ *
+ * `col`/`row` index a grid over the image, counting from the top-left the way
+ * the image reads. `rotation` is quarter turns anticlockwise, for the flaps of
+ * a net that fold in rotated - a cube net's bottom flap is printed upside down
+ * so that it comes out the right way up on the die.
+ */
+interface AtlasQuad {
+    number: number;
+    col: number;
+    row: number;
+    rotation: 0 | 1 | 2 | 3;
+}
+
+/**
+ * Which number each geometry face carries, indexed by face.
+ *
+ * This is a property of the geometry, not of the art: three.js builds a box's
+ * sides in the order +X, -X, +Y, -Y, +Z, -Z, and these numbers put opposite
+ * faces on opposite sides summing to seven, which is what makes it a die rather
+ * than a numbered cube. It changes only if three.js changes.
+ *
+ * The atlas is looked up *by number*, so this table and the art cannot drift:
+ * whatever face is found upright, the number reported is the number printed on
+ * it, because the same lookup placed the image there.
+ */
+const FACE_NUMBERS: Record<string, number[]> = {
+    d6: [4, 3, 5, 2, 1, 6]
+};
+
+/**
+ * Where each number is printed, per die type.
+ *
+ * The d6 sheet is a cube cross on a 4x4 grid: 1 on top, 3-2-4 across the
+ * middle, then 6, then 5 at the bottom, drawn upside down because that flap
+ * folds over.
+ *
+ * Every rotation here was read off a rendered die, not reasoned about: pose a
+ * face upright with harness/scripts/pose.js and look at it at 8x or more. At
+ * strip size a rotated digit and an upright one are genuinely hard to tell
+ * apart, and guessing from a small image cost a round trip.
+ */
+const ATLAS_GRID: Record<string, { cols: number; rows: number; cells: AtlasQuad[] }> = {
+    d6: {
+        cols: 4,
+        rows: 4,
+        cells: [
+            { number: 1, col: 1, row: 0, rotation: 3 },
+            { number: 3, col: 0, row: 1, rotation: 3 },
+            { number: 2, col: 1, row: 1, rotation: 3 },
+            { number: 4, col: 2, row: 1, rotation: 3 },
+            { number: 6, col: 1, row: 2, rotation: 3 },
+            { number: 5, col: 1, row: 3, rotation: 1 }
+        ]
+    }
+};
 
 
 export class D20Dice {
@@ -143,7 +214,7 @@ export class D20Dice {
     private blobShadows: THREE.Mesh[] = [];
     /** Shared by every blob: a unit quad and one gradient. */
     private blobGeometry: THREE.PlaneGeometry | null = null;
-    private blobTexture: THREE.Texture | null = null;
+    private blobTextures = new Map<number, THREE.Texture>();
     /** World Y the blobs sit on: where the dice actually come to rest. */
     private shadowPlaneY = -2.38;
     private isTearingDown = false;
@@ -151,7 +222,6 @@ export class D20Dice {
     private hoverCircle: THREE.Mesh | null = null;
     private hoverCircleMaterial: THREE.MeshBasicMaterial | null = null;
     private floorHeight = -2.4;
-    private forceClickthroughMode = false;
     public onRollComplete: ((result: number | string) => void) | null = null;
     private ambientLight: THREE.AmbientLight | null = null;
     private directionalLight: THREE.DirectionalLight | null = null;
@@ -297,6 +367,25 @@ export class D20Dice {
         // 8 and 10 settled 3/3. Re-run harness/ if you want to change this.
     }
 
+    /**
+     * The tray's footprint, in world units.
+     *
+     * Taken from the camera rather than from constants. It used to be a fixed
+     * 32 x 24 while the camera shows `20 * aspect` wide by 20 deep - so on a
+     * typical window the tray was narrower than the view left to right and
+     * deeper than it top to bottom, and the brown border drew that mismatch on
+     * screen. Dice also bounced off walls that were nowhere near the edges.
+     *
+     * `trayWidth` and `trayLength` are multipliers of the visible area now,
+     * so 1.0 means "exactly what you can see".
+     */
+    private trayDimensions(): { width: number; length: number } {
+        return {
+            width: (this.camera.right - this.camera.left) * this.settings.trayWidth,
+            length: (this.camera.top - this.camera.bottom) * this.settings.trayLength
+        };
+    }
+
     private createDiceTray() {
         // updateSettings() and the context-loss handler both call this. Without
         // tearing the old one down first, every settings change stacked another
@@ -306,8 +395,7 @@ export class D20Dice {
 
         // Create visual tray based on settings
         if (this.settings.showSurface) {
-            const trayWidth = 32 * this.settings.trayWidth;
-            const trayLength = 24 * this.settings.trayLength;
+            const { width: trayWidth, length: trayLength } = this.trayDimensions();
             const trayGeometry = new THREE.BoxGeometry(trayWidth, 0.8, trayLength);
             const trayMaterial = new THREE.MeshPhongMaterial({
                 color: this.settings.surfaceColor,
@@ -363,8 +451,7 @@ export class D20Dice {
         wallMaterial.friction = 0.3;      // Smooth wall surface
 
         // Calculate wall dimensions based on tray settings
-        const trayWidth = 32 * this.settings.trayWidth;
-        const trayLength = 24 * this.settings.trayLength;
+        const { width: trayWidth, length: trayLength } = this.trayDimensions();
         const halfWidth = trayWidth / 2;
         const halfLength = trayLength / 2;
 
@@ -409,8 +496,9 @@ export class D20Dice {
      * faint but perfectly round line, which is exactly the artefact this whole
      * change exists to get rid of. Built once and shared by every die.
      */
-    private blobSprite(): THREE.Texture {
-        if (this.blobTexture) return this.blobTexture;
+    private blobSprite(core: number): THREE.Texture {
+        const cached = this.blobTextures.get(core);
+        if (cached) return cached;
 
         const size = BLOB_TEXTURE_SIZE;
         const canvas = document.createElement('canvas');
@@ -423,8 +511,8 @@ export class D20Dice {
         for (let y = 0; y < size; y++) {
             for (let x = 0; x < size; x++) {
                 const r = Math.hypot(x + 0.5 - half, y + 0.5 - half) / half;
-                // Solid out to BLOB_CORE, then smoothstep to nothing.
-                const t = Math.min(1, Math.max(0, (r - BLOB_CORE) / (1 - BLOB_CORE)));
+                // Solid out to the core, then smoothstep to nothing.
+                const t = Math.min(1, Math.max(0, (r - core) / (1 - core)));
                 const alpha = 1 - t * t * (3 - 2 * t);
                 const i = (y * size + x) * 4;
                 image.data[i] = 0;
@@ -435,8 +523,9 @@ export class D20Dice {
         }
         ctx.putImageData(image, 0, 0);
 
-        this.blobTexture = new THREE.CanvasTexture(canvas);
-        return this.blobTexture;
+        const texture = new THREE.CanvasTexture(canvas);
+        this.blobTextures.set(core, texture);
+        return texture;
     }
 
     private createBlob(): THREE.Mesh {
@@ -444,7 +533,9 @@ export class D20Dice {
 
         const material = new THREE.MeshBasicMaterial({
             color: 0x000000,
-            map: this.blobSprite(),
+            // The sprite depends on the die's type, which a blob only learns
+            // when it is placed; updateBlobShadows() sets it.
+            map: this.blobSprite(BLOB_CORE),
             transparent: true,
             opacity: SHADOW_OPACITY,
             // A blob lies flat under a die and must never occlude one.
@@ -504,6 +595,15 @@ export class D20Dice {
             const width = radius * 2 * BLOB_SPREAD * (1 + BLOB_GROWTH * lift);
             blob.scale.set(width, width, 1);
 
+            // Blobs are reused as dice come and go, so the one at this index
+            // may have been wearing another type's sprite a frame ago.
+            const material = blob.material as THREE.MeshBasicMaterial;
+            const sprite = this.blobSprite(BLOB_CORE_BY_TYPE[type] ?? BLOB_CORE);
+            if (material.map !== sprite) {
+                material.map = sprite;
+                material.needsUpdate = true;
+            }
+
             blob.position.set(
                 die.position.x + leanX * radius,
                 this.shadowPlaneY,
@@ -523,8 +623,8 @@ export class D20Dice {
 
         this.blobGeometry?.dispose();
         this.blobGeometry = null;
-        this.blobTexture?.dispose();
-        this.blobTexture = null;
+        for (const texture of this.blobTextures.values()) texture.dispose();
+        this.blobTextures.clear();
     }
 
     private addTrayBody(body: CANNON.Body): void {
@@ -607,7 +707,7 @@ export class D20Dice {
                 this.applyTetrahedronUVMapping(geometry);
                 return geometry;
             case 'd6':
-                geometry = new THREE.BoxGeometry(this.settings.diceSize * 2, this.settings.diceSize * 2, this.settings.diceSize * 2);
+                geometry = this.createChamferedBox(this.settings.diceSize, this.settings.diceSize * 0.1);
                 this.applySquareUVMapping(geometry);
                 return geometry;
             case 'd8':
@@ -1319,6 +1419,129 @@ export class D20Dice {
         this.wake();
     }
 
+    /**
+     * A cube with its edges taken off.
+     *
+     * Straight overhead - which is where this tray's orthographic camera sits -
+     * a BoxGeometry projects to a plain square and reads as a paper tile. The
+     * chamfer earns its keep there: the rim strips face partly sideways, so they
+     * take the key light at a different angle from the top and draw a lit border
+     * around the number that a flat quad cannot.
+     *
+     * The six numbered faces come first and keep BoxGeometry's own vertex order,
+     * winding and unit-square UVs, pulled in to leave room for the rim. Anything
+     * reading faces by index - the atlas mapping, the legacy 3x2 grid - is
+     * untouched by the extra geometry, and the hardcoded +-X/+-Y/+-Z normals the
+     * result check uses still describe the faces exactly. Physics keeps the full
+     * CANNON.Box: an 8% chamfer is not worth a hull for.
+     */
+    private createChamferedBox(size: number, bevel: number): THREE.BufferGeometry {
+        const box = new THREE.BoxGeometry(size * 2, size * 2, size * 2);
+        const inset = size - bevel;
+
+        // Every box vertex sits on a corner, so its own coordinates cannot say
+        // which face it belongs to. The normal can.
+        const boxPos = box.attributes.position;
+        const boxNormal = box.attributes.normal;
+        for (let i = 0; i < boxPos.count; i++) {
+            const along = Math.abs(boxNormal.getX(i)) > 0.5 ? 0
+                : Math.abs(boxNormal.getY(i)) > 0.5 ? 1 : 2;
+            const c = [boxPos.getX(i), boxPos.getY(i), boxPos.getZ(i)];
+            for (let axis = 0; axis < 3; axis++) {
+                if (axis !== along) c[axis] = (c[axis] / size) * inset;
+            }
+            boxPos.setXYZ(i, c[0], c[1], c[2]);
+        }
+
+        const positions = Array.from(boxPos.array as Float32Array);
+        const uvs = Array.from(box.attributes.uv.array as Float32Array);
+        const indices = Array.from(box.index!.array as ArrayLike<number>);
+
+        // The rim is painted in the die's own colour, so it wants a stretch of
+        // sheet with no art on it. Every atlas leaves its last column empty.
+        const RIM_UV = [0.97, 0.97];
+
+        const at = (axis: number, sign: number, magnitude: number) => {
+            const p = [0, 0, 0];
+            p[axis] = sign * magnitude;
+            return p;
+        };
+        const combine = (...parts: number[][]) =>
+            parts.reduce((acc, p) => [acc[0] + p[0], acc[1] + p[1], acc[2] + p[2]], [0, 0, 0]);
+
+        /** Append one outward-facing facet, winding it away from the centre. */
+        const addFacet = (corners: number[][]) => {
+            const base = positions.length / 3;
+            const e1 = corners[1].map((v, i) => v - corners[0][i]);
+            const e2 = corners[2].map((v, i) => v - corners[0][i]);
+            const cross = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0]
+            ];
+            const centroid = corners
+                .reduce((a, c) => [a[0] + c[0], a[1] + c[1], a[2] + c[2]], [0, 0, 0])
+                .map((v) => v / corners.length);
+            const outward = cross[0] * centroid[0] + cross[1] * centroid[1] + cross[2] * centroid[2] > 0;
+            const ordered = outward ? corners : corners.slice().reverse();
+
+            for (const c of ordered) {
+                positions.push(c[0], c[1], c[2]);
+                uvs.push(RIM_UV[0], RIM_UV[1]);
+            }
+            for (let i = 1; i + 1 < ordered.length; i++) {
+                indices.push(base, base + i, base + i + 1);
+            }
+        };
+
+        // Twelve strips, one per edge, each spanning the gap the inset opened
+        // between two neighbouring faces.
+        for (let axisA = 0; axisA < 3; axisA++) {
+            for (let axisB = axisA + 1; axisB < 3; axisB++) {
+                const axisC = 3 - axisA - axisB;
+                for (const signA of [-1, 1]) {
+                    for (const signB of [-1, 1]) {
+                        for (const run of [[-1, 1]]) {
+                            addFacet([
+                                combine(at(axisA, signA, size), at(axisB, signB, inset), at(axisC, run[0], inset)),
+                                combine(at(axisA, signA, size), at(axisB, signB, inset), at(axisC, run[1], inset)),
+                                combine(at(axisA, signA, inset), at(axisB, signB, size), at(axisC, run[1], inset)),
+                                combine(at(axisA, signA, inset), at(axisB, signB, size), at(axisC, run[0], inset))
+                            ]);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Eight triangles closing the corners where three strips meet.
+        for (const sx of [-1, 1]) {
+            for (const sy of [-1, 1]) {
+                for (const sz of [-1, 1]) {
+                    addFacet([
+                        [sx * size, sy * inset, sz * inset],
+                        [sx * inset, sy * size, sz * inset],
+                        [sx * inset, sy * inset, sz * size]
+                    ]);
+                }
+            }
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+        geometry.setIndex(indices);
+        // Safe to derive: no numbered face shares a vertex with a rim facet, so
+        // averaging leaves every one of them flat.
+        geometry.computeVertexNormals();
+        // The rim vertices sit past the six faces, so face N is no longer simply
+        // a slice of the whole buffer. Anything walking faces by index needs to
+        // be told where they stop.
+        geometry.userData.faceVertexCount = 4;
+        box.dispose();
+        return geometry;
+    }
+
     private createGeometryForDiceType(diceType: string): THREE.BufferGeometry {
         const baseSize = this.settings.diceSize;
         const scale = this.settings.diceScales[diceType as keyof typeof this.settings.diceScales] || 1.0;
@@ -1328,7 +1551,7 @@ export class D20Dice {
             case 'd4':
                 return new THREE.TetrahedronGeometry(size, 0);
             case 'd6':
-                return new THREE.BoxGeometry(size * 2, size * 2, size * 2);
+                return this.createChamferedBox(size, size * 0.1);
             case 'd8':
                 return new THREE.OctahedronGeometry(size, 0);
             case 'd10':
@@ -1341,7 +1564,62 @@ export class D20Dice {
         }
     }
 
+    /**
+     * Lay a die's faces onto the cells of its atlas.
+     *
+     * Each face keeps the geometry's own unit-square UVs and has them mapped
+     * into the cell printed with that face's number, rotated as the cell
+     * demands. Working from the geometry's own UVs rather than writing corners
+     * by hand means the face comes out the way three.js intended it to, mirrored
+     * the same way and wound the same way.
+     */
+    private applyQuadAtlasUV(geometry: THREE.BufferGeometry, diceType: string): boolean {
+        const atlas = ATLAS_GRID[diceType];
+        const numbers = FACE_NUMBERS[diceType];
+        if (!atlas || !numbers) return false;
+
+        const uv = geometry.attributes.uv;
+        if (!uv) return false;
+
+        // A chamfered die parks its rim vertices after the numbered faces, so
+        // the buffer no longer divides evenly into them; it says how long a face
+        // is. Everything else is still a plain slice.
+        const verticesPerFace = (geometry.userData.faceVertexCount as number)
+            || uv.count / numbers.length;
+
+        for (let face = 0; face < numbers.length; face++) {
+            const cell = atlas.cells.find((c) => c.number === numbers[face]);
+            if (!cell) continue;
+
+            for (let v = 0; v < verticesPerFace; v++) {
+                const at = face * verticesPerFace + v;
+                let u0 = uv.getX(at);
+                let v0 = uv.getY(at);
+
+                for (let turn = 0; turn < cell.rotation; turn++) {
+                    const spun = u0;
+                    u0 = v0;
+                    v0 = 1 - spun;
+                }
+
+                // Rows count downwards in the image, upwards in UV space.
+                uv.setXY(
+                    at,
+                    (cell.col + u0) / atlas.cols,
+                    (atlas.rows - 1 - cell.row + v0) / atlas.rows
+                );
+            }
+        }
+
+        uv.needsUpdate = true;
+        return true;
+    }
+
     private applyUVMappingForDiceType(geometry: THREE.BufferGeometry, diceType: string): void {
+        // A type with an atlas is laid out from it; the rest keep the old
+        // hand-built grids until their sheets are mapped too.
+        if (this.applyQuadAtlasUV(geometry, diceType)) return;
+
         switch (diceType) {
             case 'd4':
                 this.applyTriangleUVMapping(geometry, 4);
@@ -1380,6 +1658,10 @@ export class D20Dice {
             const texture = this.loadTextureFromData(textureData);
             if (texture) {
                 materialProps.map = texture;
+                // The die colour is already painted into the texture. Leaving it
+                // here too would multiply it in a second time and put back the
+                // dark, low-contrast face the composite exists to fix.
+                materialProps.color = 0xffffff;
             }
         }
 
@@ -1395,16 +1677,104 @@ export class D20Dice {
         return new THREE.MeshPhongMaterial(materialProps);
     }
 
+    /**
+     * Where a die's face art comes from.
+     *
+     * A texture pack wins over an uploaded texture. The pack is a folder of
+     * `<type>_Numbers.png` files handed over as `app://` resource URLs, which
+     * THREE.TextureLoader takes directly - no base64, and none of it stored in
+     * data.json.
+     */
     private getDiceTextureDataForType(diceType: string): string | null {
-        return this.settings.diceTextures[diceType as keyof typeof this.settings.diceTextures] || null;
+        return this.packTextures[diceType]
+            || this.settings.diceTextures[diceType as keyof typeof this.settings.diceTextures]
+            || null;
+    }
+
+    /** Resource URLs for the selected pack, keyed by die type. */
+    private packTextures: Record<string, string> = {};
+
+    public setPackTextures(textures: Record<string, string>): void {
+        this.packTextures = textures;
+        this.wake();
     }
 
     private getDiceNormalMapDataForType(diceType: string): string | null {
         return this.settings.diceNormalMaps[diceType as keyof typeof this.settings.diceNormalMaps] || null;
     }
 
+    /**
+     * Face art is a *mask*, not a picture, and has to be composited rather than
+     * tinted.
+     *
+     * A pack sheet is transparent outside the net, a faint dark wash inside each
+     * cell (rgb 88 at alpha 64), and opaque white digits. Handed straight to
+     * `map` with `color: diceColor`, three multiplies the tint into the sampled
+     * rgb and throws the alpha away - so the face came out as 88x tint and the
+     * digits as 255x tint. Both ended up the same hue, one merely lighter: a red
+     * die read as a dark maroon square with a slightly brighter red numeral on
+     * it, about 1.2:1 apart.
+     *
+     * Painting the sheet over the die colour instead uses the alpha the art was
+     * drawn with: the wash darkens the body a little and the digits stay white,
+     * whatever colour the die is. The material then has to be left white or the
+     * old multiply comes straight back.
+     */
     private loadTextureFromData(textureData: string): THREE.Texture | null {
-        return this.loadCachedTexture(textureData, 'dice texture');
+        const key = `${textureData}|${this.settings.diceColor}`;
+        const cached = this.textureCache.get(key);
+        if (cached) return cached;
+
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return this.loadCachedTexture(textureData, 'dice texture');
+
+        // Until the art decodes the die wears its plain colour, not a black or
+        // untextured flash.
+        canvas.width = canvas.height = 1;
+        ctx.fillStyle = this.settings.diceColor;
+        ctx.fillRect(0, 0, 1, 1);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.wrapS = THREE.RepeatWrapping;
+        texture.wrapT = THREE.RepeatWrapping;
+        // The canvas is painted in sRGB. Left unlabelled, three reads those
+        // bytes as linear and encodes them again on the way out, which lifts the
+        // midtones: a saturated red die came out a dusty pink.
+        texture.colorSpace = THREE.SRGBColorSpace;
+
+        const img = new Image();
+        img.onload = () => {
+            canvas.width = img.width;
+            canvas.height = img.height;
+            ctx.fillStyle = this.settings.diceColor;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0);
+            // The placeholder above is 1x1, and the GPU allocation three made
+            // for it does not grow: mark the texture dirty on its own and the
+            // repaint is uploaded into a one-pixel target, so every face samples
+            // the same flat colour and the digits never appear. Dropping the
+            // allocation first makes the next render build one at 1024.
+            texture.dispose();
+            texture.needsUpdate = true;
+            // Same reason as the loader callback below: decoding is async and
+            // the render loop may already have gone idle.
+            this.wake();
+        };
+        img.onerror = () => console.warn('Failed to load dice texture');
+        img.src = textureData;
+
+        // A die colour change asks for a fresh composite of art already in the
+        // cache; the stale one would otherwise sit there holding a GPU texture
+        // for a colour nothing renders any more.
+        for (const [otherKey, otherTexture] of this.textureCache) {
+            if (otherKey !== key && otherKey.startsWith(`${textureData}|`)) {
+                otherTexture.dispose();
+                this.textureCache.delete(otherKey);
+            }
+        }
+        this.textureCache.set(key, texture);
+        return texture;
     }
 
     private loadNormalMapFromData(normalMapData: string): THREE.Texture | null {
@@ -1996,9 +2366,8 @@ export class D20Dice {
                 return faceIndex + 1;
 
             case 'd6':
-                // Standard d6 face mapping (1-6)
-                const d6Map = [4, 3, 5, 2, 1, 6]; // Adjust based on UV layout
-                return d6Map[faceIndex] || 1;
+                // The same table that placed the art. See FACE_NUMBERS.
+                return FACE_NUMBERS.d6[faceIndex] || 1;
 
             case 'd8':
                 // D8 mapping where opposite faces sum to 9
@@ -2325,7 +2694,9 @@ export class D20Dice {
 
         // Create material with all configurable properties
         const materialProperties: any = {
-            color: this.settings.diceColor, // Always apply dice color (acts as tint with textures)
+            // Textured dice carry their colour in the composite instead; see
+            // loadTextureFromData.
+            color: customTexture ? 0xffffff : this.settings.diceColor,
             shininess: this.settings.diceShininess,
             specular: this.settings.diceSpecular,
             transparent: this.settings.diceTransparent,
@@ -2480,39 +2851,13 @@ export class D20Dice {
         }
     }
 
+    /**
+     * The single-die path wants the same composite as the tray dice: art loaded
+     * raw here was the half of the bug that survived fixing the other half.
+     */
     private loadCustomTexture(textureData?: string): THREE.Texture | null {
         if (!textureData) return null;
-
-        try {
-            // Create image element to load the texture
-            const img = new Image();
-            img.crossOrigin = 'anonymous';
-
-            const texture = new THREE.Texture();
-            texture.image = img;
-            texture.wrapS = THREE.ClampToEdgeWrapping; // Use clamp for clean edges
-            texture.wrapT = THREE.ClampToEdgeWrapping;
-            texture.minFilter = THREE.LinearFilter;
-            texture.magFilter = THREE.LinearFilter;
-            texture.generateMipmaps = false; // Disable mipmaps to reduce memory usage
-
-            // Load the image
-            img.onload = () => {
-                texture.needsUpdate = true;
-                log('Custom texture loaded successfully');
-            };
-
-            img.onerror = (error) => {
-                console.error('Failed to load custom texture image:', error);
-            };
-
-            img.src = textureData;
-
-            return texture;
-        } catch (error) {
-            console.error('Failed to load custom dice texture:', error);
-            return null;
-        }
+        return this.loadTextureFromData(textureData);
     }
 
     private getCurrentDiceNormalMapData(): string | null {
@@ -2618,8 +2963,9 @@ export class D20Dice {
         canvas.addEventListener('touchmove', (event) => this.onTouchMove(event));
         canvas.addEventListener('touchend', (event) => this.onTouchEnd(event));
 
-        // Start with click-through enabled
+        // Clicks reach the note everywhere except on a die. See trackPointer().
         canvas.style.pointerEvents = 'none';
+        document.addEventListener('mousemove', this.trackPointer, true);
     }
 
     /** Cached because getBoundingClientRect() forces a layout flush. */
@@ -2650,6 +2996,33 @@ export class D20Dice {
      * person perceives, it allocates nothing, and it is pure arithmetic.
      * Returns -1 for a miss.
      */
+    /**
+     * Give the canvas the pointer only while it is over a die.
+     *
+     * `pointer-events` cannot be per-pixel, so the canvas is `none` by default
+     * and flipped to `auto` for as long as the pointer is over a die. A
+     * mousemove always precedes the mousedown that follows it, so by the time a
+     * click lands the canvas is already listening - and everywhere else the
+     * click goes straight through to the note underneath. That is why this
+     * listens on the document: a canvas at `pointer-events: none` never hears a
+     * move of its own, so it could never turn itself back on.
+     *
+     * This replaced a manual Clickthrough toggle. The toggle was a mode, and a
+     * mode is a thing to be in the wrong one of.
+     */
+    private readonly trackPointer = (event: MouseEvent): void => {
+        if (!this.isViewActive) return;
+
+        // A drag holds the canvas open. The pointer can outrun the hit radius,
+        // and losing the canvas mid-drag would drop the die.
+        this.isHoveringDice = this.pickDiceIndex(event.clientX, event.clientY) !== -1;
+        const wanted = this.isDragging || this.isHoveringDice ? 'auto' : 'none';
+
+        const canvas = this.renderer.domElement;
+        if (canvas.style.pointerEvents !== wanted) canvas.style.pointerEvents = wanted;
+        if (wanted === 'auto') this.setCursor(this.isHoveringDice ? 'grab' : 'default');
+    };
+
     private pickDiceIndex(clientX: number, clientY: number): number {
         if (this.diceArray.length === 0) return -1;
 
@@ -2731,7 +3104,7 @@ export class D20Dice {
         // Check for hover to show visual feedback only (multi-dice system)
         if (!this.isRolling && !this.isDragging && this.diceArray.length > 0) {
             this.isHoveringDice = this.pickDiceIndex(event.clientX, event.clientY) !== -1;
-            this.setCursor(this.isHoveringDice && !this.forceClickthroughMode ? 'grab' : 'default');
+            this.setCursor(this.isHoveringDice ? 'grab' : 'default');
         }
 
         if (this.isDragging) {
@@ -2969,6 +3342,29 @@ export class D20Dice {
      * a real pointer move — animate() calls this after each step purely to undo
      * the solver's correction, and spinning there too would double the rate.
      */
+    /** How far the whole set is fanned out when dragged together. */
+    private dragSpread(): number {
+        return Math.sqrt(this.diceArray.length) * 0.8;
+    }
+
+    /**
+     * Size of the largest die being dragged, used to keep it off the walls.
+     * For a d6 this is its half-extent, for the polyhedra its circumradius.
+     */
+    private draggedRadius(): number {
+        const sizeOf = (i: number) => {
+            const type = this.diceTypeArray[i] || 'd20';
+            const scale = (this.settings.diceScales as Record<string, number>)[type] || 1;
+            return this.settings.diceSize * scale;
+        };
+
+        if (this.draggedDiceIndex >= 0) return sizeOf(this.draggedDiceIndex);
+
+        let largest = 0;
+        for (let i = 0; i < this.diceArray.length; i++) largest = Math.max(largest, sizeOf(i));
+        return largest;
+    }
+
     private applyDragPosition(spin = false) {
         if (!this.isDragging) return;
 
@@ -2983,9 +3379,22 @@ export class D20Dice {
         // Set position at dice tray level (Y = 2)
         const worldPosition = new THREE.Vector3(worldX, 2, worldZ);
 
-        // Constrain to tray bounds
-        worldPosition.x = Math.max(-9, Math.min(9, worldPosition.x));
-        worldPosition.z = Math.max(-6, Math.min(6, worldPosition.z));
+        // Keep the held die inside the tray walls.
+        //
+        // This used to clamp to a hardcoded +/-9 by +/-6, from back when the
+        // tray was a fixed size. The tray is sized from the camera now, so on a
+        // maximised window that reached less than half the width and a dragged
+        // die stopped dead in open space, nowhere near a wall.
+        //
+        // The inset is the die's own size, so it stops against the wall rather
+        // than half through it; dragging the whole set also has to allow for
+        // the spread applied below.
+        const tray = this.trayDimensions();
+        const margin = this.draggedRadius() + (this.draggedDiceIndex === -1 ? this.dragSpread() : 0);
+        const limitX = Math.max(0, tray.width / 2 - margin);
+        const limitZ = Math.max(0, tray.length / 2 - margin);
+        worldPosition.x = Math.max(-limitX, Math.min(limitX, worldPosition.x));
+        worldPosition.z = Math.max(-limitZ, Math.min(limitZ, worldPosition.z));
 
         if (this.draggedDiceIndex === -1) {
             // Drag all dice - maintain relative positions
@@ -2996,7 +3405,7 @@ export class D20Dice {
                 body.position.copy(worldPosition);
 
                 // Add slight spread to prevent overlapping
-                const spread = Math.sqrt(this.diceArray.length) * 0.8;
+                const spread = this.dragSpread();
                 const angle = (i / this.diceArray.length) * Math.PI * 2;
                 body.position.x += Math.cos(angle) * spread;
                 body.position.z += Math.sin(angle) * spread;
@@ -3702,6 +4111,16 @@ export class D20Dice {
         // Update the camera projection matrix for orthographic camera
         this.camera.updateProjectionMatrix();
 
+        // The tray is sized from the camera, so a resize moves its walls. Only
+        // once the world exists: the first call comes from init(), before
+        // there is anything to rebuild.
+        if (this.world) {
+            this.createDiceTray();
+            // A wall that moves out from under a sleeping die leaves it outside
+            // the tray, and a sleeping body never notices.
+            for (const body of this.diceBodyArray) body?.wakeUp();
+        }
+
         this.cachedRect = null;
         this.wake();
     }
@@ -3782,6 +4201,7 @@ export class D20Dice {
 
     public destroy() {
         this.isViewActive = false;
+        document.removeEventListener('mousemove', this.trackPointer, true);
         // destroy() deliberately drops the WebGL context below; without this the
         // context-lost handler reports our own teardown as a fault.
         this.isTearingDown = true;
@@ -3906,21 +4326,6 @@ export class D20Dice {
 
     // Callback for when calibration changes
     public onCalibrationChanged: (() => void) | null = null;
-
-    public setClickthroughMode(enabled: boolean) {
-        this.forceClickthroughMode = enabled;
-        const canvas = this.renderer.domElement;
-
-        if (enabled) {
-            // Enable clickthrough - make canvas non-interactive
-            canvas.style.pointerEvents = 'none';
-            this.setCursor('default');
-        } else {
-            // Disable clickthrough - make canvas interactive
-            canvas.style.pointerEvents = 'auto';
-            this.setCursor(this.isHoveringDice ? 'grab' : 'default');
-        }
-    }
 
     // Individual dice states for enhanced roll system
     private diceStates: Array<{
@@ -4278,7 +4683,9 @@ export class D20Dice {
         const dice = this.diceArray[index];
         if (!dice) return;
 
-        if (highlight) {
+        // Still take the un-highlight branch when the feature is off, so a die
+        // highlighted before the setting was turned off gets its material back.
+        if (highlight && this.settings.highlightCompletedDice) {
             // Store original material if not already stored
             if (!this.originalMaterials.has(index)) {
                 this.originalMaterials.set(index, dice.material);

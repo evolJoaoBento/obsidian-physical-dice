@@ -91,12 +91,20 @@ export interface DiceSettings {
     faceDetectionTolerance: number;
 
     // Highlight settings
+    highlightCompletedDice: boolean;
     completedDiceHighlightColor: string;
 
     // Debug settings
     enableMotionDebug: boolean;
 
     // Face calibration mapping
+    /**
+     * Folder under the plugin's dice/ directory holding one atlas per die type,
+     * named `<type>_Numbers.png`. Copy the folder, edit the images, pick it
+     * here - that is the whole of making a custom set.
+     */
+    texturePack: string;
+
     faceMapping: { [faceIndex: number]: number };
 
     // API Integration settings
@@ -160,9 +168,15 @@ export const DEFAULT_SETTINGS: DiceSettings = {
     enableShadows: true,
 
     // Lighting defaults
-    ambientLightIntensity: 1.2,
+    // Ambient near 1 flattens everything it touches: with no gradient across a
+    // face the chamfer stops reading and the dice go back to looking like tiles.
+    // Keep the fill low and let the key light do the shaping.
+    ambientLightIntensity: 0.45,
     ambientLightColor: '#ffffff',
-    directionalLightIntensity: 0.8,
+    // three stopped treating light intensity as a plain multiplier: a
+    // directional light is divided by PI now, so these read far dimmer than the
+    // numbers suggest. Both were picked against the rendered die, not the scale.
+    directionalLightIntensity: 2.8,
     directionalLightColor: '#ffffff',
     directionalLightPositionX: 0,
     directionalLightPositionY: 35,
@@ -198,12 +212,17 @@ export const DEFAULT_SETTINGS: DiceSettings = {
     faceDetectionTolerance: 0.3,
 
     // Highlight defaults
+    // Off by default: the highlight is an emissive wash over the whole die, so
+    // a settled die stops showing its own colour while it is on.
+    highlightCompletedDice: false,
     completedDiceHighlightColor: '#00ff00',
 
     // Debug defaults
     enableMotionDebug: false,
 
     // Face mapping defaults (1:1 mapping initially)
+    texturePack: 'Texture-Pack-Default',
+
     faceMapping: {
         0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9, 9: 10,
         10: 11, 11: 12, 12: 13, 13: 14, 14: 15, 15: 16, 16: 17, 17: 18, 18: 19, 19: 20
@@ -785,6 +804,17 @@ export class DiceSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     console.log('⚙️ Face detection tolerance changed from', this.plugin.settings.faceDetectionTolerance, 'to', value);
                     this.plugin.settings.faceDetectionTolerance = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.refreshDiceView();
+                }));
+
+        new Setting(motionSection)
+            .setName('Highlight completed dice')
+            .setDesc('Glow dice that have settled with a valid result. The glow washes over the whole die, hiding its colour while it is on.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.highlightCompletedDice)
+                .onChange(async (value) => {
+                    this.plugin.settings.highlightCompletedDice = value;
                     await this.plugin.saveSettings();
                     this.plugin.refreshDiceView();
                 }));
