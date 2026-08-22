@@ -148,8 +148,34 @@ interface AtlasQuad {
  * it, because the same lookup placed the image there.
  */
 const FACE_NUMBERS: Record<string, number[]> = {
-    d6: [4, 3, 5, 2, 1, 6]
+    d6: [4, 3, 5, 2, 1, 6],
+    // Opposite faces sum to nine, same idea as the cube's seven. Paired against
+    // three.js's own face order (+++ opposite ---, +-+ opposite -+-, and so on)
+    // rather than the equator walk the old result table assumed.
+    d8: [1, 2, 3, 4, 7, 8, 5, 6]
 };
+
+/**
+ * A face of a net that is not laid out on a grid.
+ *
+ * A cube unfolds onto squares that tile an image, which is why the d6 gets away
+ * with columns and rows. Nothing else does: an octahedron unfolds to a zigzag
+ * strip of triangles, a dodecahedron to two rings of pentagons. So a cell here
+ * carries its own corners, in pixels of the sheet, read off the art rather than
+ * derived - the sheets are drawn by hand and only roughly regular.
+ *
+ * `turn` says which of the cell's corners the die's first vertex lands on, and
+ * `mirror` reverses the winding. Both exist for the same reason as the quad
+ * atlas's `rotation`: the artist drew each digit for one particular unfolding,
+ * and nothing in the geometry knows which.
+ */
+interface AtlasFace {
+    number: number;
+    /** Corners in sheet pixels, in the order the image draws them. */
+    corners: Array<[number, number]>;
+    turn: number;
+    mirror?: boolean;
+}
 
 /**
  * Where each number is printed, per die type.
@@ -163,6 +189,31 @@ const FACE_NUMBERS: Record<string, number[]> = {
  * strip size a rotated digit and an upright one are genuinely hard to tell
  * apart, and guessing from a small image cost a round trip.
  */
+/**
+ * Nets that do not fit a grid, in pixels of their own sheet.
+ *
+ * The d8 strip was measured off the art, not guessed: scanning for the dark
+ * outline gives the left edge running 147 -> 0 over the first 256 rows, the
+ * shared edge running 148 -> 296 the other way, and the right edge 443 -> 296.
+ * That is a triangle 296 across and 256 high, which is equilateral to within a
+ * pixel, folded into a zigzag of four rows of two.
+ */
+const ATLAS_POLY: Record<string, { size: number; faces: AtlasFace[] }> = {
+    d8: {
+        size: 1024,
+        faces: [
+            { number: 6, corners: [[148, 0], [0, 256], [296, 256]], turn: 0 },
+            { number: 1, corners: [[148, 0], [443, 0], [296, 256]], turn: 0 },
+            { number: 3, corners: [[0, 256], [296, 256], [148, 512]], turn: 0 },
+            { number: 8, corners: [[296, 256], [148, 512], [443, 512]], turn: 0 },
+            { number: 2, corners: [[148, 512], [0, 768], [296, 768]], turn: 0 },
+            { number: 5, corners: [[148, 512], [443, 512], [296, 768]], turn: 0 },
+            { number: 7, corners: [[0, 768], [296, 768], [148, 1024]], turn: 0 },
+            { number: 4, corners: [[296, 768], [148, 1024], [443, 1024]], turn: 0 }
+        ]
+    }
+};
+
 const ATLAS_GRID: Record<string, { cols: number; rows: number; cells: AtlasQuad[] }> = {
     d6: {
         cols: 4,
@@ -1615,10 +1666,48 @@ export class D20Dice {
         return true;
     }
 
+    /**
+     * Lay a die's faces onto the cells of a net that is not a grid.
+     *
+     * Unlike the quad atlas there are no per-face UVs worth keeping: three.js
+     * gives a polyhedron a spherical projection, which has nothing to do with
+     * where the art is. So each corner of a face is assigned a corner of its
+     * cell outright, `turn` choosing where the run starts and `mirror` which way
+     * it goes round.
+     */
+    private applyPolyAtlasUV(geometry: THREE.BufferGeometry, diceType: string): boolean {
+        const atlas = ATLAS_POLY[diceType];
+        const numbers = FACE_NUMBERS[diceType];
+        if (!atlas || !numbers) return false;
+
+        const uv = geometry.attributes.uv;
+        if (!uv) return false;
+
+        const verticesPerFace = uv.count / numbers.length;
+        if (!Number.isInteger(verticesPerFace)) return false;
+
+        for (let face = 0; face < numbers.length; face++) {
+            const cell = atlas.faces.find((f) => f.number === numbers[face]);
+            if (!cell) continue;
+
+            const sides = cell.corners.length;
+            for (let v = 0; v < verticesPerFace; v++) {
+                const step = cell.mirror ? -v : v;
+                const corner = cell.corners[(((step + cell.turn) % sides) + sides) % sides];
+                // Rows count downwards in the image, upwards in UV space.
+                uv.setXY(face * verticesPerFace + v, corner[0] / atlas.size, 1 - corner[1] / atlas.size);
+            }
+        }
+
+        uv.needsUpdate = true;
+        return true;
+    }
+
     private applyUVMappingForDiceType(geometry: THREE.BufferGeometry, diceType: string): void {
         // A type with an atlas is laid out from it; the rest keep the old
         // hand-built grids until their sheets are mapped too.
         if (this.applyQuadAtlasUV(geometry, diceType)) return;
+        if (this.applyPolyAtlasUV(geometry, diceType)) return;
 
         switch (diceType) {
             case 'd4':
@@ -2211,7 +2300,42 @@ export class D20Dice {
         return normals;
     }
 
+    /**
+     * Face normals taken from the geometry, in the geometry's own face order.
+     *
+     * The hand-written tables below list the right normals in the wrong order:
+     * three.js builds an octahedron's faces as +++, +-+, +--, ++-, -+-, ---,
+     * --+, -++, and the table walks them round the equator instead. That is
+     * invisible while the number is only a lookup - any permutation still gives
+     * a number - but the atlas addresses faces by their geometry index, so the
+     * two disagreed and every d8 showed a digit belonging to a different face.
+     *
+     * Anything with a polygon atlas therefore reads its normals from the same
+     * buffer the UVs came from, which is the only way the two orders cannot
+     * drift apart again.
+     */
+    private deriveFaceNormalsFromGeometry(diceType: string): THREE.Vector3[] {
+        const geometry = this.createGeometryForDiceType(diceType);
+        const pos = geometry.attributes.position;
+        const perFace = (geometry.userData.faceVertexCount as number) || 3;
+        const normals: THREE.Vector3[] = [];
+
+        for (let base = 0; base + 2 < pos.count; base += perFace) {
+            const a = new THREE.Vector3().fromBufferAttribute(pos, base);
+            const b = new THREE.Vector3().fromBufferAttribute(pos, base + 1);
+            const c = new THREE.Vector3().fromBufferAttribute(pos, base + 2);
+            normals.push(new THREE.Vector3()
+                .crossVectors(b.clone().sub(a), c.clone().sub(a))
+                .normalize());
+        }
+
+        geometry.dispose();
+        return normals;
+    }
+
     private computeFaceNormalsForDiceType(diceType: string): THREE.Vector3[] {
+        if (ATLAS_POLY[diceType]) return this.deriveFaceNormalsFromGeometry(diceType);
+
         switch (diceType) {
             case 'd4':
                 // THREE.js TetrahedronGeometry creates a regular tetrahedron with vertices:
@@ -2370,14 +2494,8 @@ export class D20Dice {
                 return FACE_NUMBERS.d6[faceIndex] || 1;
 
             case 'd8':
-                // D8 mapping where opposite faces sum to 9
-                // Octahedron opposite pairs based on face normals:
-                // Index 0 (+,+,+) ↔ Index 6 (-,-,-) → 1 ↔ 8
-                // Index 1 (-,+,+) ↔ Index 7 (+,-,-) → 2 ↔ 7
-                // Index 2 (-,-,+) ↔ Index 4 (+,+,-) → 3 ↔ 6
-                // Index 3 (+,-,+) ↔ Index 5 (-,+,-) → 4 ↔ 5
-                const d8Map = [1, 2, 3, 4, 6, 5, 8, 7];
-                return d8Map[faceIndex] || 1;
+                // The same table that placed the art. See FACE_NUMBERS.
+                return FACE_NUMBERS.d8[faceIndex] || 1;
 
             case 'd10':
                 // D10 uses 0-9 or 00-90
