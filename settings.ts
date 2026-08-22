@@ -139,8 +139,11 @@ export const DEFAULT_SETTINGS: DiceSettings = {
 
     // Individual dice scaling defaults
     diceScales: {
-        d4: 1.0,
-        d6: 1.0,
+        // A d6 is BoxGeometry(size * 2), so at an equal scale it reads far
+        // larger than the others; a d4 rests on a triangle and reads smaller.
+        // These bring the set to a consistent apparent size.
+        d4: 1.1,
+        d6: 0.7,
         d8: 1.0,
         d10: 1.0,
         d12: 1.0,

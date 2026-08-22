@@ -10,49 +10,103 @@ const UP = new THREE.Vector3(0, 1, 0);
 const DOWN = new THREE.Vector3(0, -1, 0);
 
 /**
- * Real shadows, cast onto the page.
+ * Contact shadows, drawn as blurred discs under each die.
  *
- * The dice sit on a transparent canvas over a note, so there is normally
- * nothing in the scene for a shadow to land on — which is why the plugin's
- * original shadow settings produced nothing at all whenever the tray surface
- * was hidden. A THREE.ShadowMaterial solves it: a plane wearing one is
- * completely invisible except where something shadows it, so the shadow appears
- * to fall directly on whatever is behind the canvas.
+ * This replaces a real shadow map, deliberately. See "Blurred discs, second
+ * time around" in PERFORMANCE-NOTES.md — the map worked, but it was janky in a
+ * way no amount of resolution or filtering fixed, and it dragged two bugs
+ * along with it: a shadow that vanished the moment a die landed, and a
+ * direction that could not be reconciled with the configured light.
+ *
+ * A disc centred under the die has neither problem. There is no direction to
+ * keep in sync, and nothing to land on or miss.
  */
 
-/** How dark a fully shadowed pixel gets. */
+/** How dark the centre of a blob gets. */
 const SHADOW_OPACITY = 0.38;
 
 /**
- * Shadow map resolution. The map covers the whole tray, so this is the whole
- * budget, and 1024 over this tray keeps a d20 silhouette readable.
- */
-const SHADOW_MAP_SIZE = 1024;
-
-
-/**
- * Depth bias. The light is nearly overhead and the receiver is a flat plane, so
- * a small constant bias plus a normal-facing one is enough to keep contact
- * shadows tight without detaching them from the die.
- */
-const SHADOW_BIAS = -0.0004;
-const SHADOW_NORMAL_BIAS = 0.02;
-
-/**
- * How far the shadow-casting light leans over, as horizontal distance per unit
- * of height. The camera looks straight down, so a light directly overhead puts
- * every shadow underneath the die that casts it, where it cannot be seen at
- * all. Leaning the light over slides the shadow out into view.
+ * Blob radius per die type, as a multiple of that die's `size`
+ * (`diceSize` x `diceScales[type]`).
  *
- * 0.55 puts the shadow of a die roughly half its own height to one side.
+ * Two different rules, because the types need different things.
+ *
+ * d8, d12 and d20 have near-round footprints, so their radius is the circle
+ * with the same *area* as that footprint - it fills the shape and looks right.
+ *
+ * d4, d6 and d10 do not. A d6 rests on a square whose inscribed radius is 0.80
+ * and circumscribed 1.13; an area-equivalent disc lands at 0.90, which bulges
+ * past the flat edges while still missing the corners.
+ *
+ * d4 sits at its inscribed radius, tight inside the shape. d6 and d10 sit
+ * between inscribed and area-equivalent - tighter than a disc that fills the
+ * footprint, but not so tight that the shadow disappears under the die.
+ *
+ * All measured in the running app rather than derived. A single radius for
+ * every type is exactly what makes blob shadows look wrong.
  */
-const SHADOW_LEAN = 0.55;
+const BLOB_RADIUS: Record<string, number> = {
+    d4: 0.46, d6: 0.96, d8: 0.72, d10: 0.67, d12: 0.88, d20: 0.86
+};
 
-/** Azimuth used when the scene light is exactly overhead and gives no hint. */
-const SHADOW_DEFAULT_AZIMUTH = { x: 0.85, z: 0.53 };
+/**
+ * Height of a resting die's centre above the plane it rests on, per unit of
+ * `size`. Also measured. Used to tell "on the table" from "in the air" exactly,
+ * so a die at rest gets a full-strength blob and not a slightly faded one.
+ */
+const BLOB_REST_HEIGHT: Record<string, number> = {
+    d4: 0.58, d6: 1.00, d8: 1.00, d10: 0.95, d12: 0.93, d20: 0.85
+};
 
-/** The tray box is 0.8 tall and centred at y = -2, so its visible top is here. */
-const TRAY_TOP_Y = -1.6;
+/**
+ * How far past the blob radius the gradient runs before it reaches zero. The
+ * disc has to fade out inside its own quad or its edge shows as a hard circle,
+ * so this is always > 1.
+ *
+ * 1.6 was the first value and it read as a soft halo rather than a shadow.
+ * Tightening it to 1.25 while raising BLOB_CORE keeps the same amount of dark
+ * but stops it spreading past the die. 1.0 was tried: at that width a d4 and a
+ * d6 have no visible shadow at all, because each covers its own disc.
+ */
+const BLOB_SPREAD = 1.25;
+
+/**
+ * Fraction of the quad's radius that stays fully dark before the falloff
+ * starts. With BLOB_SPREAD at 1.25 this puts the solid part at 0.75 of the
+ * die's own footprint radius, so what shows past the die is the fade, not a
+ * disc with a visible edge.
+ */
+const BLOB_CORE = 0.6;
+
+/**
+ * How far the blob slides away from the light, as a fraction of its own radius.
+ *
+ * A disc dead centre under a die reads as a symmetric halo rather than as a
+ * shadow. A small lean in the direction the light is coming from fixes that
+ * without any of the trouble the old shadow map had: this is a fixed fraction
+ * of the blob's radius, so it never depends on the light's elevation, never
+ * grows with height, and cannot slide out from under the die.
+ *
+ * Kept deliberately slight. 0.28 was tried first and reads as a die standing
+ * beside its shadow rather than on it; 0.09 is enough to break the symmetry and
+ * no more. With the light exactly overhead there is no azimuth and the offset
+ * is zero — which is what an overhead light should look like, and is what the
+ * old SHADOW_DEFAULT_AZIMUTH got wrong by inventing a diagonal.
+ */
+const BLOB_OFFSET = 0.09;
+
+/** A die this far above its resting height has no blob left. */
+const BLOB_FADE_HEIGHT = 6;
+
+/** How much wider the blob grows over that same distance. */
+const BLOB_GROWTH = 0.6;
+
+/** Pixels across the shared gradient texture. It is blurry; it can be small. */
+const BLOB_TEXTURE_SIZE = 128;
+
+/** The physics floor. Everything that claims to be a surface agrees with it. */
+const FLOOR_Y = -2.4;
+
 
 export class D20Dice {
     private scene: THREE.Scene;
@@ -85,12 +139,12 @@ export class D20Dice {
     private trayMesh: THREE.Mesh | null = null;
     private trayBorder: THREE.LineSegments | null = null;
     private trayBodies: CANNON.Body[] = [];
-    /**
-     * Invisible plane that catches the dice's shadows. Wearing a ShadowMaterial
-     * it draws nothing but the shadow itself, so the canvas stays transparent.
-     */
-    private shadowCatcher: THREE.Mesh | null = null;
-    /** World Y the shadows land on: the visible tray top, or the physics floor. */
+    /** One blurred disc per die, index-aligned with diceArray. */
+    private blobShadows: THREE.Mesh[] = [];
+    /** Shared by every blob: a unit quad and one gradient. */
+    private blobGeometry: THREE.PlaneGeometry | null = null;
+    private blobTexture: THREE.Texture | null = null;
+    /** World Y the blobs sit on: where the dice actually come to rest. */
     private shadowPlaneY = -2.38;
     private isTearingDown = false;
     private windowBorder: HTMLElement | null = null;
@@ -101,11 +155,6 @@ export class D20Dice {
     public onRollComplete: ((result: number | string) => void) | null = null;
     private ambientLight: THREE.AmbientLight | null = null;
     private directionalLight: THREE.DirectionalLight | null = null;
-    /**
-     * Casts the shadows and lights nothing. See setupLighting() for why it is a
-     * second light rather than the one the user configures.
-     */
-    private shadowLight: THREE.DirectionalLight | null = null;
     public isViewActive: boolean = true; // Track if the view is active
 
     // Render loop state. The loop stops itself once nothing is moving; every
@@ -172,10 +221,6 @@ export class D20Dice {
                 // Flat-shaded solids plus one texture — highp buys nothing here.
                 precision: "mediump"
             });
-            // Shadows land on the shadow catcher; see createShadowCatcher().
-            this.renderer.shadowMap.enabled = this.settings.enableShadows;
-            this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-
             // Add WebGL context loss/restore handlers
             const canvas = this.renderer.domElement;
             canvas.addEventListener('webglcontextlost', (event) => {
@@ -270,8 +315,13 @@ export class D20Dice {
                 opacity: this.settings.surfaceOpacity
             });
             this.trayMesh = new THREE.Mesh(trayGeometry, trayMaterial);
-            this.trayMesh.position.set(0, -2, 0);
-            this.trayMesh.receiveShadow = this.settings.enableShadows;
+            // The box is 0.8 tall, so centring it 0.4 below the floor puts its
+            // top face exactly on the floor. Centred at -2 — where it was — its
+            // top sat at -1.6 while dice rested at -2.4, and every die was
+            // buried 0.8 deep inside the surface it appeared to rest on.
+            // Nothing moves on screen: the camera is orthographic looking
+            // straight down, so Y is depth.
+            this.trayMesh.position.set(0, FLOOR_Y - 0.4, 0);
             this.scene.add(this.trayMesh);
 
             // Add border if enabled (using tray's own border settings)
@@ -298,18 +348,14 @@ export class D20Dice {
         const floorBody = new CANNON.Body({ mass: 0, material: floorMaterial });
         floorBody.addShape(floorShape);
         floorBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
-        floorBody.position.set(0, -2.4, 0);
+        floorBody.position.set(0, FLOOR_Y, 0);
         this.floorHeight = floorBody.position.y;
         this.addTrayBody(floorBody);
 
-        // Blobs sit just above whatever the dice appear to rest on: the top of
-        // the visible tray if there is one, otherwise the physics floor.
-        this.shadowPlaneY = this.settings.showSurface
-            ? TRAY_TOP_Y + 0.02
-            : this.floorHeight + 0.02;
-
-        // The catcher lives on the same plane, so it is rebuilt with the tray.
-        this.createShadowCatcher();
+        // Dice rest on the floor whether or not the surface is drawn, so this
+        // is the contact plane in both cases. It used to follow the visible
+        // tray top instead, which put it 0.8 above where dice actually land.
+        this.shadowPlaneY = this.floorHeight + 0.02;
 
         // Physics tray walls - realistic wood/plastic walls
         const wallMaterial = new CANNON.Material('wall');
@@ -352,52 +398,133 @@ export class D20Dice {
     }
 
     // =======================================================================
-    // Shadow catcher
+    // Blob shadows
     // =======================================================================
 
     /**
-     * The plane the dice cast onto.
+     * The gradient every blob wears: opaque in the middle, nothing at the edge.
      *
-     * A shadow map has to land on geometry, and with the tray surface hidden
-     * there is none — the canvas is transparent over a note. That is why the
-     * plugin's shadow settings drew nothing for so long: not just the
-     * `castShadow` flag being set on a Material instead of the mesh, but no
-     * receiver in the scene at all.
-     *
-     * THREE.ShadowMaterial is the missing piece. A mesh wearing one contributes
-     * nothing to the picture except the shadows falling on it, so this plane is
-     * completely invisible and the shadow appears to lie on whatever is behind
-     * the canvas — the note itself.
+     * The falloff is a smoothstep rather than a linear ramp so the disc has no
+     * visible rim at any scale — a linear gradient shows its outer circle as a
+     * faint but perfectly round line, which is exactly the artefact this whole
+     * change exists to get rid of. Built once and shared by every die.
      */
-    private createShadowCatcher(): void {
-        this.removeShadowCatcher();
-        if (!this.settings.enableShadows) return;
+    private blobSprite(): THREE.Texture {
+        if (this.blobTexture) return this.blobTexture;
 
-        // Keep this close to the tray. The catcher is a transparent plane that
-        // every one of its pixels runs a shadow lookup on, so making it larger
-        // than it needs to be is paid for in fill rate on every frame — an
-        // oversized one was most of why this felt slow.
-        const width = 32 * this.settings.trayWidth + 4;
-        const length = 24 * this.settings.trayLength + 4;
+        const size = BLOB_TEXTURE_SIZE;
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('blob shadow: no 2d context');
 
-        const material = new THREE.ShadowMaterial({ opacity: SHADOW_OPACITY });
-        // The catcher sits under everything; it must never hide a die.
-        material.depthWrite = false;
+        const image = ctx.createImageData(size, size);
+        const half = size / 2;
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const r = Math.hypot(x + 0.5 - half, y + 0.5 - half) / half;
+                // Solid out to BLOB_CORE, then smoothstep to nothing.
+                const t = Math.min(1, Math.max(0, (r - BLOB_CORE) / (1 - BLOB_CORE)));
+                const alpha = 1 - t * t * (3 - 2 * t);
+                const i = (y * size + x) * 4;
+                image.data[i] = 0;
+                image.data[i + 1] = 0;
+                image.data[i + 2] = 0;
+                image.data[i + 3] = Math.round(alpha * 255);
+            }
+        }
+        ctx.putImageData(image, 0, 0);
 
-        this.shadowCatcher = new THREE.Mesh(new THREE.PlaneGeometry(width, length), material);
-        this.shadowCatcher.rotation.x = -Math.PI / 2;
-        this.shadowCatcher.position.set(0, this.shadowPlaneY, 0);
-        this.shadowCatcher.receiveShadow = true;
-        this.shadowCatcher.renderOrder = -1;
-        this.scene.add(this.shadowCatcher);
+        this.blobTexture = new THREE.CanvasTexture(canvas);
+        return this.blobTexture;
     }
 
-    private removeShadowCatcher(): void {
-        if (!this.shadowCatcher) return;
-        this.scene.remove(this.shadowCatcher);
-        this.shadowCatcher.geometry.dispose();
-        (this.shadowCatcher.material as THREE.Material).dispose();
-        this.shadowCatcher = null;
+    private createBlob(): THREE.Mesh {
+        if (!this.blobGeometry) this.blobGeometry = new THREE.PlaneGeometry(1, 1);
+
+        const material = new THREE.MeshBasicMaterial({
+            color: 0x000000,
+            map: this.blobSprite(),
+            transparent: true,
+            opacity: SHADOW_OPACITY,
+            // A blob lies flat under a die and must never occlude one.
+            depthWrite: false
+        });
+
+        const blob = new THREE.Mesh(this.blobGeometry, material);
+        blob.rotation.x = -Math.PI / 2;
+        blob.renderOrder = -1;
+        this.scene.add(blob);
+        return blob;
+    }
+
+    /**
+     * Reconcile the blobs to the dice, then place them.
+     *
+     * Called from renderFrame() rather than from every path that adds or
+     * removes a die. There are five such paths and one of them will be added
+     * later without this in mind; comparing two array lengths on a frame that
+     * was going to be drawn anyway costs nothing and cannot be forgotten.
+     */
+    private updateBlobShadows(): void {
+        const wanted = this.settings.enableShadows ? this.diceArray.length : 0;
+
+        // Which way the light is coming from, flattened. Read once per frame
+        // rather than per die.
+        const lightX = this.settings.directionalLightPositionX;
+        const lightZ = this.settings.directionalLightPositionZ;
+        const horizontal = Math.hypot(lightX, lightZ);
+        const leanX = horizontal > 1e-3 ? -(lightX / horizontal) * BLOB_OFFSET : 0;
+        const leanZ = horizontal > 1e-3 ? -(lightZ / horizontal) * BLOB_OFFSET : 0;
+
+        while (this.blobShadows.length > wanted) {
+            const blob = this.blobShadows.pop();
+            if (!blob) break;
+            this.scene.remove(blob);
+            (blob.material as THREE.Material).dispose();
+        }
+        while (this.blobShadows.length < wanted) this.blobShadows.push(this.createBlob());
+
+        for (let i = 0; i < this.blobShadows.length; i++) {
+            const die = this.diceArray[i];
+            const blob = this.blobShadows[i];
+            if (!die) continue;
+
+            const type = this.diceTypeArray[i] || 'd20';
+            const scale = (this.settings.diceScales as Record<string, number>)[type] || 1;
+            const size = this.settings.diceSize * scale;
+            const radius = (BLOB_RADIUS[type] ?? BLOB_RADIUS.d20) * size;
+            const restHeight = (BLOB_REST_HEIGHT[type] ?? BLOB_REST_HEIGHT.d20) * size;
+
+            // Height above where this type of die sits when it is at rest, so a
+            // settled die gets a full-strength blob rather than a nearly one.
+            const height = Math.max(0, die.position.y - (this.shadowPlaneY + restHeight));
+            const lift = Math.min(1, height / BLOB_FADE_HEIGHT);
+
+            const width = radius * 2 * BLOB_SPREAD * (1 + BLOB_GROWTH * lift);
+            blob.scale.set(width, width, 1);
+
+            blob.position.set(
+                die.position.x + leanX * radius,
+                this.shadowPlaneY,
+                die.position.z + leanZ * radius
+            );
+            (blob.material as THREE.MeshBasicMaterial).opacity = SHADOW_OPACITY * (1 - lift);
+            blob.visible = lift < 1;
+        }
+    }
+
+    private disposeBlobShadows(): void {
+        for (const blob of this.blobShadows) {
+            this.scene.remove(blob);
+            (blob.material as THREE.Material).dispose();
+        }
+        this.blobShadows = [];
+
+        this.blobGeometry?.dispose();
+        this.blobGeometry = null;
+        this.blobTexture?.dispose();
+        this.blobTexture = null;
     }
 
     private addTrayBody(body: CANNON.Body): void {
@@ -406,8 +533,6 @@ export class D20Dice {
     }
 
     private removeDiceTray(): void {
-        this.removeShadowCatcher();
-
         if (this.trayMesh) {
             this.scene.remove(this.trayMesh);
             this.trayMesh.geometry.dispose();
@@ -1181,10 +1306,6 @@ export class D20Dice {
         // Create physics body
         const body = this.createPhysicsBodyForDiceType(diceType);
         body.position.set(position.x, position.y, position.z);
-
-        // Dice cast onto the shadow catcher, and onto each other.
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
 
         // Add to scene and world
         this.scene.add(mesh);
@@ -2453,14 +2574,6 @@ export class D20Dice {
                 this.scene.remove(this.directionalLight.target);
             }
         }
-        if (this.shadowLight) {
-            this.shadowLight.shadow.map?.dispose();
-            this.scene.remove(this.shadowLight);
-            this.scene.remove(this.shadowLight.target);
-            this.shadowLight.dispose();
-            this.shadowLight = null;
-        }
-
         // Ambient light with configurable intensity and color
         this.ambientLight = new THREE.AmbientLight(
             new THREE.Color(this.settings.ambientLightColor),
@@ -2484,79 +2597,11 @@ export class D20Dice {
         // Target the center of the dice tray
         this.directionalLight.target.position.set(0, -2, 0);
 
-        // The scene light does the shading and nothing else.
+        // Nothing casts any more. The contact shadows are drawn, not projected.
         this.directionalLight.castShadow = false;
 
         this.scene.add(this.directionalLight);
         this.scene.add(this.directionalLight.target);
-
-        this.setupShadowLight();
-    }
-
-    /**
-     * A second directional light, of zero intensity, that exists only to cast.
-     *
-     * Two problems make this the right shape rather than just switching
-     * castShadow on for the light above.
-     *
-     * The camera looks straight down and the configured light is nearly
-     * overhead — (9, 50, 0) by default — so a die's shadow lands almost exactly
-     * underneath it and the die hides its own shadow completely. The fix is to
-     * lean the caster over, and that must not disturb how the dice are lit.
-     *
-     * The reason a light with no intensity can still cast is THREE.ShadowMaterial:
-     * it draws the shadow mask directly rather than darkening a light's
-     * contribution, so the shadow survives even though this light adds nothing
-     * to the picture. Verified in the running app, not assumed.
-     */
-    private setupShadowLight(): void {
-        if (!this.settings.enableShadows) return;
-
-        this.shadowLight = new THREE.DirectionalLight(0xffffff, 0);
-
-        // Keep the shadow going the same way as the configured light, so it
-        // agrees with which side of the dice is lit — just far less steeply.
-        const x = this.settings.directionalLightPositionX;
-        const z = this.settings.directionalLightPositionZ;
-        const horizontal = Math.hypot(x, z);
-        const azimuth = horizontal > 1e-3
-            ? { x: x / horizontal, z: z / horizontal }
-            : SHADOW_DEFAULT_AZIMUTH;
-
-        const height = Math.max(this.settings.directionalLightPositionY, 10);
-        this.shadowLight.position.set(
-            azimuth.x * height * SHADOW_LEAN,
-            height,
-            azimuth.z * height * SHADOW_LEAN
-        );
-        this.shadowLight.target.position.set(0, this.shadowPlaneY, 0);
-        this.shadowLight.castShadow = true;
-
-        // Fit the shadow camera to the tray. Left at three.js's default it is a
-        // 10-unit box around the origin, and a die thrown past that simply
-        // stops casting — which reads as the shadow blinking out.
-        const halfWidth = (32 * this.settings.trayWidth) / 2;
-        const halfLength = (24 * this.settings.trayLength) / 2;
-        // The lean pushes shadows outside the tray footprint, so allow for it.
-        const reach = Math.max(halfWidth, halfLength) * (1 + SHADOW_LEAN) + 4;
-
-        const camera = this.shadowLight.shadow.camera as THREE.OrthographicCamera;
-        camera.left = -reach;
-        camera.right = reach;
-        camera.top = reach;
-        camera.bottom = -reach;
-        camera.near = 0.5;
-        camera.far = height * 3 + 40;
-        camera.updateProjectionMatrix();
-
-        const shadow = this.shadowLight.shadow;
-        shadow.mapSize.width = SHADOW_MAP_SIZE;
-        shadow.mapSize.height = SHADOW_MAP_SIZE;
-        shadow.bias = SHADOW_BIAS;
-        shadow.normalBias = SHADOW_NORMAL_BIAS;
-
-        this.scene.add(this.shadowLight);
-        this.scene.add(this.shadowLight.target);
     }
 
     private setupDragControls() {
@@ -3146,6 +3191,8 @@ export class D20Dice {
             }
         }
 
+        this.updateBlobShadows();
+
         this.renderer.render(this.scene, this.camera);
         this.needsRender = false;
     }
@@ -3612,11 +3659,19 @@ export class D20Dice {
     }
 
 
+    /**
+     * Size to the container the canvas is actually in.
+     *
+     * This used to derive the size from the window minus a hardcoded 44px for
+     * Obsidian's header, which meant the canvas disagreed with the overlay
+     * holding it at any zoom other than 100%. The container knows its own size.
+     */
     private setInitialSize() {
-        // Get the full window size minus ribbon
-        const containerWidth = window.innerWidth;
-        const containerHeight = window.innerHeight - 44; // 44px for ribbon
-        this.updateSize(containerWidth, containerHeight);
+        const rect = this.container.getBoundingClientRect();
+        this.updateSize(
+            rect.width || window.innerWidth,
+            rect.height || window.innerHeight
+        );
     }
 
     public updateSize(width: number, height: number) {
@@ -3712,9 +3767,6 @@ export class D20Dice {
         // Update tray (createDiceTray removes the previous one)
         this.createDiceTray();
 
-        // Update renderer shadow settings
-        this.renderer.shadowMap.enabled = this.settings.enableShadows;
-
         // Update lighting (this also refits the shadow camera to the tray)
         this.setupLighting();
 
@@ -3788,7 +3840,7 @@ export class D20Dice {
             });
             this.originalMaterials.clear();
             this.textureCache.clear();
-            this.removeShadowCatcher();
+            this.disposeBlobShadows();
             this.scene.clear();
         }
 

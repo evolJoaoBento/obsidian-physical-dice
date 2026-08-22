@@ -118,7 +118,81 @@ Two details make it work:
      `onBeforeCompile` did produce a genuinely smooth, wide blur. It also made
      the plugin noticeably laggy in real use, and was reverted.
 
-   Shipping `PCFSoftShadowMap` at 1024 with three's own defaults.
+   Shipping `PCFSoftShadowMap` with three's own defaults. *(Superseded — the
+   shadow map was later removed entirely. See "Blurred discs, second time
+   around".)*
+
+3. **Blockiness was a resolution problem, not a filter problem.** Everything
+   above chased *softness* and got nowhere. The shadow later still read as
+   pixelated for a different reason: the shadow camera is fitted to the whole
+   tray plus the lean, about 58 world units across, so at 1024 the map carries
+   ~18 texels per world unit. The view camera puts 55-80 device pixels on that
+   same unit, which makes one shadow texel a 4-5 pixel block on screen — and a
+   d20 at `diceSize` 0.8 only ~28 texels wide to begin with.
+
+   `SHADOW_MAP_SIZE` is now 2048, halving the block. The other lever, fitting
+   the shadow camera to the dice instead of the tray, buys more density but
+   reintroduces the bug the frustum fit exists to prevent: a die outside the
+   frustum stops casting, and the shadow blinks out. A per-frame fit also makes
+   texel density change as dice spread, so edges shimmer. Not taken.
+
+## Blurred discs, second time around
+
+The shadow map is gone. Everything above stands as a record of making it work
+and then making it sharp; none of it made it stop looking wrong.
+
+Three things were true at once by the end:
+
+- **Janky.** Raising the map to 2048 fixed the blockiness and the shadow still
+  read as a rendering artefact rather than as a die sitting on a page.
+- **It vanished on landing.** The catcher followed the *visible* tray top when
+  `showSurface` was on, which is 0.8 above where dice actually rest — the tray
+  box was centred at -2 with the physics floor at its underside, -2.4, so every
+  die was buried 0.8 deep inside the surface it appeared to be on. A landed die
+  sat below its own receiver and cast nothing.
+- **Its direction could not be reconciled with the light.** `SHADOW_LEAN` threw
+  away the configured elevation and substituted 0.55, because the real one puts
+  the shadow under the die where it cannot be seen. Measured: a light at
+  (27, 81, -11) implies 0.36; the shadow used 0.50. With the light exactly
+  overhead there was no azimuth to read at all and it fell back to a hardcoded
+  diagonal.
+
+A disc centred under each die has none of these. There is no direction to keep
+in sync and no plane to miss.
+
+**Sizing is per type, and measured.** A d6 is `BoxGeometry(size * 2)`, so at the
+same `diceSize` its resting footprint is 1.7x a d20's; a d4 rests on a triangle
+and covers three quarters of one. `BLOB_RADIUS` holds the radius of the circle
+with the same area as each type's footprint, read out of the running app:
+
+| | d4 | d6 | d8 | d10 | d12 | d20 |
+|---|---|---|---|---|---|---|
+| radius x size | 0.65 | 1.13 | 0.80 | 0.80 | 0.88 | 0.86 |
+| rest height x size | 0.58 | 1.00 | 1.00 | 0.95 | 0.93 | 0.85 |
+
+One radius for every type is the thing that makes blob shadows look cheap.
+
+**Silhouette blobs were tried and removed.** d4, d6 and d10 have outlines a
+circle cannot describe — a d6's disc sits between its inscribed 0.80 and
+circumscribed 1.13, so it bulges past the flat edges and never reaches the
+corners at once. Three attempts at drawing the die's actual outline instead:
+rings scaled about the centroid, rings at a constant radial offset, and finally
+a signed distance field in a fragment shader. The first two put a dark wedge at
+every corner (scaling and radial offsetting are both not offsetting by
+*distance*); the third was correct but exposed a much older bug — the convex
+hull kept duplicate points, because a die repeats each corner once per face, and
+a zero-length edge made the field divide by zero and tear.
+
+All of it is gone. The disc is what ships, for every type. It does not fit a d6
+and that is accepted: tight and plain beat clever and fragile here, and three
+rewrites of the same feature is the signal to stop.
+
+**Tightness, and only where it was wanted.** d8, d12 and d20 were fine and are
+untouched: `BLOB_SPREAD` stays 1.25 and their radius is still their footprint's
+area-equivalent. d4, d6 and d10 moved to their footprint's *inscribed* radius,
+so the disc stays inside the shape and only the fade reaches past it. Measured
+against each die's own outline radius: d4 0.61, d6 0.71, d10 0.68, against
+d8 1.22, d12 1.12, d20 1.09.
 
 ## A benchmark that measured the wrong thing
 
@@ -147,8 +221,9 @@ transparent draw calls on top of its own fill.
 No numbers are quoted here on purpose. See the section above for why the ones
 that were quoted turned out to be worthless.
 
-If it ever needs to be cheaper: `enableShadows` is a setting, and
-`SHADOW_MAP_SIZE` is the next lever after that.
+*(Superseded: there is no shadow map any more. `enableShadows` still switches
+the blobs off, and it is now the only lever, because the blobs cost one small
+transparent quad each.)*
 
 The blob was more expensive than the thing it was avoiding: per-die vertex
 maths, a material write each, and two dozen extra transparent draw calls, versus

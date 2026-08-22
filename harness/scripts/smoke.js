@@ -70,8 +70,8 @@ try {
     for (const t of ['+D4', '+D6', '+D8', '+D10', '+D12', '+D20']) typeButton(t)?.click();
     await wait(400);
     record('six dice added via panel', dice.diceArray.length === 6, `count=${dice.diceArray.length}`);
-    record('shadow catcher present', !!dice.shadowCatcher);
-    record('dice cast shadows', dice.diceArray.every((m) => m.castShadow));
+    record('one blob per die', dice.blobShadows.length === dice.diceArray.length,
+        `${dice.blobShadows.length} blobs / ${dice.diceArray.length} dice`);
     record(
         'count display updated',
         /6\/50/.test(panel.querySelector('.dice-count-display').textContent),
@@ -107,15 +107,84 @@ try {
     dice.animate();                                // one frame, nothing moving
     record('render loop stops itself', armed && dice.animationId === null);
 
-    // --- shadows ------------------------------------------------------------
+    // --- blob shadows --------------------------------------------------------
     await pump(2);
-    record('shadow map enabled', dice.renderer.shadowMap.enabled === true);
-    record('a light casts', !!dice.shadowLight && dice.shadowLight.castShadow === true);
-    record('catcher sits on the resting plane',
-        !!dice.shadowCatcher && Math.abs(dice.shadowCatcher.position.y - dice.shadowPlaneY) < 1e-6);
-    // The catcher must never paint over the dice or the note behind it.
-    record('catcher is invisible except for shadow',
-        !!dice.shadowCatcher && dice.shadowCatcher.material.type === 'ShadowMaterial');
+
+    // The shadow map is gone entirely, not merely switched off: a depth pass is
+    // a second render of the scene, and nothing here needs one any more.
+    record('no shadow map pass', dice.renderer.shadowMap.enabled === false);
+    record('no shadow-casting light', dice.shadowLight == null && dice.shadowCatcher == null);
+
+    record('blobs sit on the contact plane',
+        dice.blobShadows.every((b) => Math.abs(b.position.y - dice.shadowPlaneY) < 1e-6));
+
+    // The blob leans away from the configured light by a fixed fraction of its
+    // own radius. Fixed is the point: it cannot drift out of agreement with the
+    // light the way a projected shadow's elevation did.
+    const lightX = plugin.settings.directionalLightPositionX;
+    const lightZ = plugin.settings.directionalLightPositionZ;
+    const horizontal = Math.hypot(lightX, lightZ);
+    const leans = dice.blobShadows.map((b, i) => {
+        const dx = b.position.x - dice.diceArray[i].position.x;
+        const dz = b.position.z - dice.diceArray[i].position.z;
+        const len = Math.hypot(dx, dz);
+        return {
+            len,
+            // 1 when the lean points exactly away from the light.
+            alignment: len < 1e-9 || horizontal < 1e-3
+                ? 0
+                : -(dx * lightX + dz * lightZ) / (horizontal * len),
+            fraction: len / b.scale.x
+        };
+    });
+    record('blobs lean away from the light',
+        horizontal < 1e-3
+            ? leans.every((l) => l.len < 1e-9)
+            : leans.every((l) => l.alignment > 0.999),
+        `alignment=${leans.map((l) => l.alignment.toFixed(3)).join(',')}`);
+    // Not "the same fraction of its blob" any more: a silhouette blob's scale
+    // is 1, because its size lives in its vertices. The invariant that still
+    // means something is that the lean stays slight next to the die itself.
+    const outlineRadius = (i) => {
+        const die = dice.diceArray[i];
+        const p = die.geometry.attributes.position;
+        const v = new die.position.constructor();
+        let max = 0;
+        for (let k = 0; k < p.count; k++) {
+            v.fromBufferAttribute(p, k).applyQuaternion(die.quaternion);
+            max = Math.max(max, Math.hypot(v.x, v.z));
+        }
+        return max;
+    };
+    record('the lean stays slight',
+        leans.every((l, i) => l.len > 0 && l.len < outlineRadius(i) * 0.2),
+        leans.map((l, i) => `${dice.diceTypeArray[i]}:${(l.len / outlineRadius(i)).toFixed(3)}`).join(' '));
+
+    // A d6 is BoxGeometry(size*2), so its footprint is far wider than a d20's.
+    // One blob size for every type is exactly the thing that looks wrong.
+    // How far the blob actually reaches on screen.
+    const blobExtent = (i) => dice.blobShadows[i].scale.x / 2;
+    const extentOf = (type) => {
+        const i = dice.diceTypeArray.indexOf(type);
+        return i === -1 ? null : blobExtent(i);
+    };
+    // Every die's shadow is proportional to that die: the per-type radius is
+    // what does it, so the ratio is the thing to assert rather than an ordering
+    // between types.
+    record('every blob is proportional to its own die',
+        dice.blobShadows.every((b, i) => {
+            const ratio = blobExtent(i) / outlineRadius(i);
+            return ratio > 0.4 && ratio < 1.4;
+        }),
+        ['d4', 'd6', 'd8', 'd10', 'd12', 'd20']
+            .map((t) => `${t}=${(extentOf(t) ?? 0).toFixed(2)}`).join(' '));
+
+    // Tight is the brief: a blob much wider than its die reads as fog. The quad
+    // is wider than the disc it carries, so the bound is on the quad.
+    record('blobs stay tight to the die',
+        dice.blobShadows.every((b, i) => blobExtent(i) <= outlineRadius(i) * 1.4),
+        dice.blobShadows.map((b, i) =>
+            `${dice.diceTypeArray[i]}:${(blobExtent(i) / outlineRadius(i)).toFixed(2)}`).join(' '));
 
     // --- a settings change must reach the screen ------------------------------
     const beforeBodies = dice.world.bodies.length;
@@ -133,18 +202,22 @@ try {
     // updateSettings only marks the scene dirty; a frame has to run for the
     // blobs to be hidden, and rAF is throttled when Obsidian is not focused.
     await pump(2);
-    record('shadows respect the toggle',
-        dice.renderer.shadowMap.enabled === false && dice.shadowCatcher === null);
-    plugin.settings.enableShadows = true;
-    dice.updateSettings(plugin.settings);
+    record('shadows respect the toggle', dice.blobShadows.length === 0);
 
-    // Real shadows are the silhouette by construction, so there is no outline
-    // to line up any more — that whole class of bug is gone with the blobs.
     plugin.settings.enableShadows = true;
     dice.updateSettings(plugin.settings);
     await pump(2);
     record('shadows come back when re-enabled',
-        dice.renderer.shadowMap.enabled === true && !!dice.shadowCatcher);
+        dice.blobShadows.length === dice.diceArray.length);
+
+    // A blob outliving its die is a leak that draws.
+    const diceBeforeRemove = dice.diceArray.length;
+    dice.removeSingleDice('d8');
+    await pump(2);
+    record('a removed die takes its blob with it',
+        dice.diceArray.length === diceBeforeRemove - 1 &&
+        dice.blobShadows.length === dice.diceArray.length,
+        `${dice.blobShadows.length} blobs / ${dice.diceArray.length} dice`);
 
     // --- hit testing --------------------------------------------------------
     const rect = dice.renderer.domElement.getBoundingClientRect();

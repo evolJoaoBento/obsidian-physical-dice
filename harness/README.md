@@ -15,12 +15,23 @@ and it changes in both places, because there is only one copy of it.
 The harness is a replica, and a replica can always be wrong about something.
 `harness/obsidian-cdp.mjs` avoids the question by attaching to Obsidian itself.
 
-Launch Obsidian with a debug port once:
+Nothing to launch by hand. Any command opens the port if it is closed, by
+restarting Obsidian with it — so a cold machine and a warm one behave the same:
 
-```powershell
-Stop-Process -Name obsidian
-& "$env:LOCALAPPDATA\Obsidian\Obsidian.exe" --remote-debugging-port=9222
+```bash
+node harness/obsidian-cdp.mjs ensure     # port open, vault back, plugin loaded
+node harness/obsidian-cdp.mjs restart    # restart even if the port is open
+node harness/obsidian-cdp.mjs stop       # close Obsidian, and the port with it
 ```
+
+`ensure` is idempotent, so it costs nothing to run first. `restart` is the one
+to use after a rebuild: it is what loads the new `main.js`. Both close Obsidian
+by asking its window to close before insisting, wait for the debug port to
+answer, and then wait again for `app.plugins.plugins.dsix` to exist — a window
+on the port is not yet a loaded plugin, and an eval that lands in between fails
+for reasons that have nothing to do with what it was testing.
+
+Set `OBSIDIAN_EXE` if Obsidian is not at `%LOCALAPPDATA%\Obsidian\Obsidian.exe`.
 
 Then:
 
@@ -36,7 +47,20 @@ node harness/obsidian-cdp.mjs front
 node harness/obsidian-cdp.mjs reload
 ```
 
-Two things the driver handles that are easy to get wrong:
+Two things the driver does *not* handle, and both cost a round trip the first
+time:
+
+- **`saveSettings()` is debounced.** It calls `queueSave()` and returns before
+  anything reaches disk, so an `await` on it proves nothing. Sleep ~3s before
+  reading `data.json` back.
+- **A debug value written into the live settings gets persisted.**
+  `writeSettings()` serialises the whole settings object, so the next save from
+  anywhere — a settings-tab control, the smoke suite — writes your debug value
+  to `data.json`. Setting `showWindowBorder` to a bright red to measure the
+  overlay region is not temporary. Read the fields off disk with
+  `await p.loadData()` first, and put them back when you are done.
+
+Two things the driver does handle that are easy to get wrong:
 
 - **Throttling.** Chromium treats a window behind your terminal as hidden and
   stops requestAnimationFrame entirely, so nothing moves and every timing test
@@ -46,8 +70,9 @@ Two things the driver handles that are easy to get wrong:
 - **Pumping.** `pump` runs the plugin's real `animate()` with a fixed timestep,
   so physics advances deterministically and far faster than real time.
 
-Close the debug port when you are done by restarting Obsidian normally. While it
-is open, anything running locally can drive the app.
+Close the debug port when you are done: `stop` and reopen Obsidian normally, or
+just restart it yourself. While the port is open, anything running locally can
+drive the app and read the vault.
 
 ### smoke.js
 

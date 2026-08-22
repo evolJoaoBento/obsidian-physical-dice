@@ -354,6 +354,18 @@ export default class D20DicePlugin extends Plugin {
         });
         this.overlayCleanups.push(() => this.app.workspace.offref(layoutRef));
 
+        // Dragging a sidebar edge or changing the zoom resizes the workspace
+        // without resizing the window, and without firing layout-change either.
+        // Watching the element itself is the only thing that catches those.
+        const observed = this.overlayRegion().el;
+        if (observed && typeof ResizeObserver !== 'undefined') {
+            // Same debounce as the window path: a drag fires this per frame,
+            // and each call reallocates the renderer's framebuffer.
+            const observer = new ResizeObserver(resizeHandler);
+            observer.observe(observed);
+            this.overlayCleanups.push(() => observer.disconnect());
+        }
+
         // Initial sizing
         window.setTimeout(() => this.updateOverlaySize(), 50);
     }
@@ -431,26 +443,66 @@ export default class D20DicePlugin extends Plugin {
         };
     }
 
+    /**
+     * Where the dice are allowed to be, measured rather than guessed.
+     *
+     * This used to be the window minus a hardcoded 44px for the header. That
+     * number is only right on a desktop Obsidian at 100% zoom with the default
+     * frame: the zoom setting scales the header, the hidden-frame and native
+     * -titlebar settings change it again, and nothing ever subtracted the
+     * status bar, so dice rolled underneath it and vanished.
+     *
+     * `.workspace` spans exactly the region wanted — below the titlebar and tab
+     * header, above the status bar, ribbon and sidebars included. The fallback
+     * chain keeps this working in the harness, and in any Obsidian that renames
+     * things, rather than sizing to nothing.
+     */
+    private overlayRegion(): { el: HTMLElement | null; rect: DOMRect } {
+        let el: HTMLElement | null = null;
+        let rect = new DOMRect(0, 0, window.innerWidth, window.innerHeight);
+
+        for (const selector of ['.workspace', '.app-container']) {
+            const candidate = document.querySelector(selector) as HTMLElement | null;
+            if (!candidate) continue;
+            const candidateRect = candidate.getBoundingClientRect();
+            if (candidateRect.width <= 0 || candidateRect.height <= 0) continue;
+            el = candidate;
+            rect = candidateRect;
+            break;
+        }
+
+        // `.workspace` reaches the top of the window on desktop Obsidian: the
+        // titlebar and its tabs are drawn over it rather than above it. Left
+        // alone, dice roll across the tab bar and under the window buttons.
+        // Measured at 39px here where the old constant guessed 44 — and it is
+        // a different number at a different zoom, which is the whole reason
+        // this is measured. Clamping rather than subtracting keeps it correct
+        // on a build where `.workspace` already starts below the titlebar.
+        const titlebar = document.querySelector('.titlebar') as HTMLElement | null;
+        if (titlebar) {
+            const bar = titlebar.getBoundingClientRect();
+            const top = Math.max(rect.top, bar.bottom);
+            if (top > rect.top) {
+                rect = new DOMRect(rect.left, top, rect.width, rect.bottom - top);
+            }
+        }
+
+        return { el, rect };
+    }
+
     private updateOverlaySize() {
         if (!this.diceOverlay || !this.dice) return;
 
-        const windowHeight = window.innerHeight;
-        const windowWidth = window.innerWidth;
+        const { rect } = this.overlayRegion();
 
-        // Calculate available space (below ribbon)
-        const ribbonHeight = 44; // Obsidian ribbon height
+        // The overlay is position: fixed, so viewport coordinates go in as they
+        // come out of getBoundingClientRect().
+        this.diceOverlay.style.left = `${rect.left}px`;
+        this.diceOverlay.style.top = `${rect.top}px`;
+        this.diceOverlay.style.width = `${rect.width}px`;
+        this.diceOverlay.style.height = `${rect.height}px`;
 
-        const availableHeight = windowHeight - ribbonHeight;
-        const availableWidth = windowWidth;
-
-        // Update dice renderer size to fill the window
-        this.dice.updateSize(availableWidth, availableHeight);
-
-        // Update overlay to fill entire window except ribbon
-        this.diceOverlay.style.width = `${availableWidth}px`;
-        this.diceOverlay.style.height = `${availableHeight}px`;
-        this.diceOverlay.style.left = '0';
-        this.diceOverlay.style.top = `${ribbonHeight}px`;
+        this.dice.updateSize(rect.width, rect.height);
     }
 
     private hideDiceOverlay() {
