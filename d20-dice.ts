@@ -1892,15 +1892,39 @@ export class D20Dice {
             const cell = atlas.faces.find((f) => f.number === numbers[face]);
             if (!cell) continue;
 
-            const sides = cell.corners.length;
+            // Read the cell backwards.
+            //
+            // A net is drawn to be looked at from outside the folded die - that
+            // is what makes it a net - so walking a cell's corners as the image
+            // draws them goes round the face the opposite way from walking the
+            // face's own corners, which are wound outward. Taking them in the
+            // order given turns every face into its own mirror image: the digits
+            // still land in the right places, still upright, still on the right
+            // faces, and every one of them back to front.
+            //
+            // It survived a long time because nothing compares a die with
+            // anything outside itself. Faces agreeing with each other says only
+            // that they are all wrong the same way, and a mirrored polygon has
+            // exactly the edge lengths of an unmirrored one. What catches it is
+            // posing a face at the camera and asking whether the walk turns the
+            // same way on screen as it does in the image.
+            //
+            // The d6 does not come through here and is not affected: its net
+            // lies on a grid, so it keeps three.js's own face UVs and only has
+            // them moved onto the right cell.
+            const wound = cell.corners.slice().reverse();
+            const sides = wound.length;
             const base = face * verticesPerFace;
 
             if (cell.vertices) {
+                // Corner-read art names its corners rather than walking them, so
+                // reversing the corners alone is what flips it - the names stay
+                // where they are and now describe the mirrored positions.
                 const owners = this.cornerNumbersForFace(geometry, face, verticesPerFace, numbers.length);
                 for (let v = 0; v < verticesPerFace; v++) {
                     const at = cell.vertices.indexOf(owners[v]);
                     if (at < 0) continue;
-                    const corner = cell.corners[at];
+                    const corner = wound[at];
                     uv.setXY(base + v, corner[0] / atlas.size, 1 - corner[1] / atlas.size);
                 }
                 continue;
@@ -1913,10 +1937,10 @@ export class D20Dice {
             const ring = verticesPerFace === sides ? null : this.ringOrderForFace(position, base, verticesPerFace);
             // The cell has to be anchored by the same rule the face was, or the
             // two agree on where the walk starts only by luck.
-            const anchor = ring ? this.anchorCorner(cell.corners) : -1;
+            const anchor = ring ? this.anchorCorner(wound) : -1;
             const corners = anchor < 0
-                ? cell.corners
-                : cell.corners.slice(anchor).concat(cell.corners.slice(0, anchor));
+                ? wound
+                : wound.slice(anchor).concat(wound.slice(0, anchor));
 
             for (let v = 0; v < verticesPerFace; v++) {
                 const seat = ring ? ring[v] : v;

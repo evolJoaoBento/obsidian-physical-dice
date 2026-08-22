@@ -307,6 +307,78 @@ try {
         `caught=${caughtNow} returned=${rerollReturned}`
     );
 
+    // --- art the right way round ---------------------------------------------
+    //
+    // Every face of every type, posed at the camera: walk its corners and check
+    // the walk turns the same way on screen as the same walk turns in the image.
+    // Disagreeing means the digit is drawn back to front.
+    //
+    // Worth its own check because nothing else catches it. Comparing faces with
+    // each other only says they are all wrong the same way, a mirrored polygon
+    // has exactly the edge lengths of an unmirrored one, and posing a face and
+    // looking at it needs someone to notice that a 2 is the wrong way round.
+    // The whole atlas shipped mirrored for a while on the strength of that.
+    {
+        const V = dice.camera.position.constructor;
+        const M = dice.camera.matrixWorld.constructor;
+        const backwards = [];
+        for (const type of ['d4', 'd6', 'd8', 'd10', 'd100', 'd12', 'd20']) {
+            dice.clearAllDice();
+            dice.createSingleDice(type);
+            const mesh = dice.diceArray[0];
+            const g = mesh.geometry, pos = g.attributes.position, uv = g.attributes.uv;
+            const faces = dice.getFaceCountForDiceType(type);
+            const per = g.userData.faceVertexCount || pos.count / faces;
+            const normals = dice.getFaceNormalsForDiceType(type);
+            let wrong = 0;
+
+            for (let f = 0; f < faces; f++) {
+                const yAxis = normals[f].clone().normalize();
+                const seed = Math.abs(yAxis.y) > 0.9 ? new V(1, 0, 0) : new V(0, 1, 0);
+                const zAxis = seed.clone().sub(yAxis.clone().multiplyScalar(seed.dot(yAxis))).normalize();
+                const xAxis = new V().crossVectors(yAxis, zAxis).normalize();
+                const from = new M().makeBasis(xAxis, yAxis, zAxis);
+                const to = new M().makeBasis(new V(-1, 0, 0), new V(0, 1, 0), new V(0, 0, -1));
+                mesh.quaternion.setFromRotationMatrix(to.multiply(from.invert()));
+                mesh.position.set(0, 0, 0);
+                mesh.updateMatrixWorld(true);
+
+                const P = [], U = [];
+                for (let v = 0; v < per; v++) {
+                    const world = new V().fromBufferAttribute(pos, f * per + v).applyMatrix4(mesh.matrixWorld);
+                    if (P.some((r) => r.distanceToSquared(world) < 1e-8)) continue;
+                    P.push(world);
+                    U.push([uv.getX(f * per + v), uv.getY(f * per + v)]);
+                }
+
+                // Round the face, not in buffer order: a signed area only means
+                // something if the polygon is walked along its edge.
+                const order = P.map((world, i) => {
+                    const n = world.clone().project(dice.camera);
+                    return { i, a: Math.atan2(-n.y, n.x) };
+                }).sort((x, y) => x.a - y.a).map((e) => e.i);
+
+                const area = (pts) => {
+                    let sum = 0;
+                    for (let i = 0; i < pts.length; i++) {
+                        const a = pts[i], b = pts[(i + 1) % pts.length];
+                        sum += a[0] * b[1] - b[0] * a[1];
+                    }
+                    return sum;
+                };
+                const screen = order.map((i) => {
+                    const n = P[i].clone().project(dice.camera);
+                    return [n.x, -n.y];
+                });
+                const image = order.map((i) => [U[i][0], 1 - U[i][1]]);
+                if (Math.sign(area(screen)) !== Math.sign(area(image))) wrong++;
+            }
+            if (wrong) backwards.push(`${type} ${wrong}/${faces}`);
+        }
+        dice.clearAllDice();
+        record('no face is mirrored', backwards.length === 0, backwards.join(' '));
+    }
+
     // --- close and reopen (leak check) ---------------------------------------
     const canvasesBefore = document.querySelectorAll('canvas').length;
     app.commands.executeCommandById('dsix:toggle-dice-roller');
