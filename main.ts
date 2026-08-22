@@ -655,6 +655,13 @@ export default class D20DicePlugin extends Plugin {
         }
     }, 100, true);
 
+    /** Rebuild the dice, for settings that change their shape rather than their look. */
+    rebuildDice(): void {
+        if (this.dice) {
+            this.dice.rebuildDice();
+        }
+    }
+
     /**
      * Point the dice at a different pack.
      *

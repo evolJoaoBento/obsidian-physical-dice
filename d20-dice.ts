@@ -221,24 +221,48 @@ interface AtlasFace {
 /**
  * Nets that do not fit a grid, in pixels of their own sheet.
  *
- * The d8 strip was measured off the art, not guessed: scanning for the dark
- * outline gives the left edge running 147 -> 0 over the first 256 rows, the
- * shared edge running 148 -> 296 the other way, and the right edge 443 -> 296.
- * That is a triangle 296 across and 256 high, which is equilateral to within a
- * pixel, folded into a zigzag of four rows of two.
+ * All of these are read off the art by harness/scripts/net.js rather than
+ * fitted, and they are read rather than typed for a reason beyond accuracy: the
+ * extractor walks every cell the same way round. The d8's cells were written out
+ * by hand at first, alternating handedness without anyone noticing, and a
+ * mirrored triangle has exactly the edge lengths of an unmirrored one - so four
+ * of its eight faces carried back-to-front digits through every check that
+ * measured the shape.
  */
+/** How far into a face the rim eats, as a share of the die's half-size. */
+const BEVEL_DEPTH = 0.1;
+
+/**
+ * A patch of each sheet with nothing printed on it, for the rim to wear.
+ *
+ * Outside a net the art is transparent, and the composite paints the die's own
+ * colour there, so a rim pointed at empty sheet comes out plain - which is what
+ * a rim should be. These are all well clear of their nets: the d6's cross
+ * leaves its last column free, the strip and ring nets all stop short of the
+ * right-hand edge, and the d4's triangle leaves its top-left corner open.
+ */
+const RIM_UV: Record<string, [number, number]> = {
+    d4: [0.1, 0.9],
+    d6: [0.97, 0.97],
+    d8: [0.85, 0.5],
+    d10: [0.85, 0.5],
+    d12: [0.85, 0.5],
+    d20: [0.85, 0.5],
+    default: [0.97, 0.97]
+};
+
 const ATLAS_POLY: Record<string, { size: number; faces: AtlasFace[] }> = {
     d8: {
         size: 1024,
         faces: [
-            { number: 6, corners: [[148, 0], [0, 256], [296, 256]], turn: 0 },
-            { number: 1, corners: [[148, 0], [443, 0], [296, 256]], turn: 0 },
-            { number: 3, corners: [[0, 256], [296, 256], [148, 512]], turn: 0 },
-            { number: 8, corners: [[296, 256], [148, 512], [443, 512]], turn: 0 },
-            { number: 2, corners: [[148, 512], [0, 768], [296, 768]], turn: 0 },
-            { number: 5, corners: [[148, 512], [443, 512], [296, 768]], turn: 0 },
-            { number: 7, corners: [[0, 768], [296, 768], [148, 1024]], turn: 0 },
-            { number: 4, corners: [[296, 768], [148, 1024], [443, 1024]], turn: 0 }
+            { number: 1, corners: [[150, 1], [441, 1], [295, 253]], turn: 0 },
+            { number: 6, corners: [[2, 254], [147, 2], [293, 254]], turn: 0 },
+            { number: 3, corners: [[2, 257], [293, 257], [147, 509]], turn: 0 },
+            { number: 8, corners: [[295, 258], [441, 510], [150, 510]], turn: 0 },
+            { number: 5, corners: [[150, 513], [441, 513], [295, 765]], turn: 0 },
+            { number: 2, corners: [[147, 514], [293, 766], [2, 766]], turn: 0 },
+            { number: 7, corners: [[2, 769], [293, 769], [147, 1021]], turn: 0 },
+            { number: 4, corners: [[295, 770], [441, 1022], [150, 1022]], turn: 0 }
         ]
     },
     // Read off the sheet by harness/scripts/net.js rather than fitted: the
@@ -867,7 +891,7 @@ export class D20Dice {
                 this.applyTetrahedronUVMapping(geometry);
                 return geometry;
             case 'd6':
-                geometry = this.createChamferedBox(this.settings.diceSize, this.settings.diceSize * 0.1);
+                geometry = this.createGeometryForDiceType('d6');
                 this.applySquareUVMapping(geometry);
                 return geometry;
             case 'd8':
@@ -1580,126 +1604,184 @@ export class D20Dice {
     }
 
     /**
-     * A cube with its edges taken off.
+     * Take the edges off a die.
      *
-     * Straight overhead - which is where this tray's orthographic camera sits -
-     * a BoxGeometry projects to a plain square and reads as a paper tile. The
-     * chamfer earns its keep there: the rim strips face partly sideways, so they
-     * take the key light at a different angle from the top and draw a lit border
-     * around the number that a flat quad cannot.
+     * Real dice are not sharp, and under this tray's orthographic camera - which
+     * looks straight down - a sharp solid loses most of what says it is solid: a
+     * cube projects to a plain square and reads as a paper tile. The rim strips
+     * face partly sideways, so they take the key light at their own angle and
+     * draw a lit border around whatever number is up.
      *
-     * The six numbered faces come first and keep BoxGeometry's own vertex order,
-     * winding and unit-square UVs, pulled in to leave room for the rim. Anything
-     * reading faces by index - the atlas mapping, the legacy 3x2 grid - is
-     * untouched by the extra geometry, and the hardcoded +-X/+-Y/+-Z normals the
-     * result check uses still describe the faces exactly. Physics keeps the full
-     * CANNON.Box: an 8% chamfer is not worth a hull for.
+     * Every face is pulled in towards its own centre, which leaves it flat, in
+     * the same plane, and the same shape - so the atlas still lands on it
+     * exactly as before. The gap that opens along each edge is bridged by a
+     * strip, and the gap at each corner by a cap. Those come after the numbered
+     * faces in the buffer, so anything walking faces by index has to be told
+     * where they stop; that is what faceVertexCount is for.
+     *
+     * Shrinking towards the centre is a true chamfer only for a regular face.
+     * The d10's kites are not regular and come out very slightly uneven, which
+     * at the width of a rim is not a thing anyone can see.
+     *
+     * Physics keeps the full sharp hull. A tenth of a face is not worth a second
+     * collision shape, and a die that looks a hair smaller than it collides is
+     * the error nobody notices.
      */
-    private createChamferedBox(size: number, bevel: number): THREE.BufferGeometry {
-        const box = new THREE.BoxGeometry(size * 2, size * 2, size * 2);
-        const inset = size - bevel;
+    private chamferGeometry(
+        source: THREE.BufferGeometry,
+        faceCount: number,
+        bevel: number,
+        rimUV: [number, number]
+    ): THREE.BufferGeometry {
+        const geometry = source.index ? source.toNonIndexed() : source;
+        if (geometry !== source) source.dispose();
 
-        // Every box vertex sits on a corner, so its own coordinates cannot say
-        // which face it belongs to. The normal can.
-        const boxPos = box.attributes.position;
-        const boxNormal = box.attributes.normal;
-        for (let i = 0; i < boxPos.count; i++) {
-            const along = Math.abs(boxNormal.getX(i)) > 0.5 ? 0
-                : Math.abs(boxNormal.getY(i)) > 0.5 ? 1 : 2;
-            const c = [boxPos.getX(i), boxPos.getY(i), boxPos.getZ(i)];
-            for (let axis = 0; axis < 3; axis++) {
-                if (axis !== along) c[axis] = (c[axis] / size) * inset;
-            }
-            boxPos.setXYZ(i, c[0], c[1], c[2]);
+        const pos = geometry.attributes.position;
+        const uvAttribute = geometry.attributes.uv;
+        const perFace = pos.count / faceCount;
+        if (!Number.isInteger(perFace) || perFace < 3) return geometry;
+
+        // Which of the die's corners each buffer vertex sits on. Faces share
+        // corners, and the strips and caps are built out of that sharing.
+        const corners: THREE.Vector3[] = [];
+        const cornerOf: number[] = [];
+        for (let v = 0; v < pos.count; v++) {
+            const point = new THREE.Vector3().fromBufferAttribute(pos, v);
+            let at = corners.findIndex((c) => c.distanceToSquared(point) < 1e-8);
+            if (at < 0) at = corners.push(point) - 1;
+            cornerOf.push(at);
         }
 
-        const positions = Array.from(boxPos.array as Float32Array);
-        const uvs = Array.from(box.attributes.uv.array as Float32Array);
-        const indices = Array.from(box.index!.array as ArrayLike<number>);
+        const positions = Array.from(pos.array as Float32Array);
+        const uvs = uvAttribute ? Array.from(uvAttribute.array as Float32Array) : [];
+        const indices: number[] = [];
+        for (let i = 0; i < pos.count; i += 3) indices.push(i, i + 1, i + 2);
 
-        // The rim is painted in the die's own colour, so it wants a stretch of
-        // sheet with no art on it. Every atlas leaves its last column empty.
-        const RIM_UV = [0.97, 0.97];
+        // Where each corner of each face ends up once the face is pulled in.
+        const pulled: Array<Map<number, THREE.Vector3>> = [];
+        const ring: number[][] = [];
 
-        const at = (axis: number, sign: number, magnitude: number) => {
-            const p = [0, 0, 0];
-            p[axis] = sign * magnitude;
-            return p;
-        };
-        const combine = (...parts: number[][]) =>
-            parts.reduce((acc, p) => [acc[0] + p[0], acc[1] + p[1], acc[2] + p[2]], [0, 0, 0]);
+        for (let face = 0; face < faceCount; face++) {
+            const base = face * perFace;
+            const own: number[] = [];
+            for (let v = 0; v < perFace; v++) {
+                const at = cornerOf[base + v];
+                if (!own.includes(at)) own.push(at);
+            }
 
-        /** Append one outward-facing facet, winding it away from the centre. */
-        const addFacet = (corners: number[][]) => {
-            const base = positions.length / 3;
-            const e1 = corners[1].map((v, i) => v - corners[0][i]);
-            const e2 = corners[2].map((v, i) => v - corners[0][i]);
-            const cross = [
-                e1[1] * e2[2] - e1[2] * e2[1],
-                e1[2] * e2[0] - e1[0] * e2[2],
-                e1[0] * e2[1] - e1[1] * e2[0]
-            ];
-            const centroid = corners
-                .reduce((a, c) => [a[0] + c[0], a[1] + c[1], a[2] + c[2]], [0, 0, 0])
-                .map((v) => v / corners.length);
-            const outward = cross[0] * centroid[0] + cross[1] * centroid[1] + cross[2] * centroid[2] > 0;
-            const ordered = outward ? corners : corners.slice().reverse();
+            const centre = own
+                .reduce((sum, at) => sum.add(corners[at].clone()), new THREE.Vector3())
+                .divideScalar(own.length);
+            const span = own.reduce((most, at) => Math.max(most, corners[at].distanceTo(centre)), 0);
+            const keep = span > 1e-6 ? Math.max(0, 1 - bevel / span) : 1;
 
-            for (const c of ordered) {
-                positions.push(c[0], c[1], c[2]);
-                uvs.push(RIM_UV[0], RIM_UV[1]);
+            const moved = new Map<number, THREE.Vector3>();
+            for (const at of own) {
+                moved.set(at, centre.clone().lerp(corners[at], keep));
+            }
+            pulled.push(moved);
+
+            for (let v = 0; v < perFace; v++) {
+                const to = moved.get(cornerOf[base + v])!;
+                positions[(base + v) * 3] = to.x;
+                positions[(base + v) * 3 + 1] = to.y;
+                positions[(base + v) * 3 + 2] = to.z;
+            }
+
+            // Corners walked round the face, so a strip knows which pairs are
+            // edges and a cap knows which faces sit either side of it.
+            const normal = new THREE.Vector3().crossVectors(
+                corners[own[1]].clone().sub(corners[own[0]]),
+                corners[own[2]].clone().sub(corners[own[0]])
+            ).normalize();
+            const across = corners[own[0]].clone().sub(centre).normalize();
+            const along = new THREE.Vector3().crossVectors(normal, across);
+            ring.push(own.slice().sort((a, b) => {
+                const oa = corners[a].clone().sub(centre);
+                const ob = corners[b].clone().sub(centre);
+                return Math.atan2(oa.dot(along), oa.dot(across)) - Math.atan2(ob.dot(along), ob.dot(across));
+            }));
+        }
+
+        /** Add one outward-facing patch, winding it away from the middle. */
+        const patch = (points: THREE.Vector3[]) => {
+            const first = positions.length / 3;
+            const centre = points
+                .reduce((sum, p) => sum.add(p.clone()), new THREE.Vector3())
+                .divideScalar(points.length);
+            const facing = new THREE.Vector3()
+                .crossVectors(points[1].clone().sub(points[0]), points[2].clone().sub(points[0]));
+            const ordered = facing.dot(centre) > 0 ? points : points.slice().reverse();
+
+            for (const p of ordered) {
+                positions.push(p.x, p.y, p.z);
+                if (uvAttribute) uvs.push(rimUV[0], rimUV[1]);
             }
             for (let i = 1; i + 1 < ordered.length; i++) {
-                indices.push(base, base + i, base + i + 1);
+                indices.push(first, first + i, first + i + 1);
             }
         };
 
-        // Twelve strips, one per edge, each spanning the gap the inset opened
-        // between two neighbouring faces.
-        for (let axisA = 0; axisA < 3; axisA++) {
-            for (let axisB = axisA + 1; axisB < 3; axisB++) {
-                const axisC = 3 - axisA - axisB;
-                for (const signA of [-1, 1]) {
-                    for (const signB of [-1, 1]) {
-                        for (const run of [[-1, 1]]) {
-                            addFacet([
-                                combine(at(axisA, signA, size), at(axisB, signB, inset), at(axisC, run[0], inset)),
-                                combine(at(axisA, signA, size), at(axisB, signB, inset), at(axisC, run[1], inset)),
-                                combine(at(axisA, signA, inset), at(axisB, signB, size), at(axisC, run[1], inset)),
-                                combine(at(axisA, signA, inset), at(axisB, signB, size), at(axisC, run[0], inset))
-                            ]);
-                        }
-                    }
-                }
+        // One strip per edge. An edge belongs to exactly two faces on a closed
+        // solid, and anything else is not a die.
+        const edges = new Map<string, Array<{ face: number; from: number; to: number }>>();
+        for (let face = 0; face < faceCount; face++) {
+            const round = ring[face];
+            for (let i = 0; i < round.length; i++) {
+                const from = round[i];
+                const to = round[(i + 1) % round.length];
+                const key = from < to ? `${from}:${to}` : `${to}:${from}`;
+                if (!edges.has(key)) edges.set(key, []);
+                edges.get(key)!.push({ face, from, to });
             }
         }
-
-        // Eight triangles closing the corners where three strips meet.
-        for (const sx of [-1, 1]) {
-            for (const sy of [-1, 1]) {
-                for (const sz of [-1, 1]) {
-                    addFacet([
-                        [sx * size, sy * inset, sz * inset],
-                        [sx * inset, sy * size, sz * inset],
-                        [sx * inset, sy * inset, sz * size]
-                    ]);
-                }
-            }
+        for (const [, sides] of edges) {
+            if (sides.length !== 2) continue;
+            const [a, b] = sides;
+            patch([
+                pulled[a.face].get(a.from)!,
+                pulled[a.face].get(a.to)!,
+                pulled[b.face].get(a.to)!,
+                pulled[b.face].get(a.from)!
+            ]);
         }
 
-        const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-        geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-        geometry.setIndex(indices);
-        // Safe to derive: no numbered face shares a vertex with a rim facet, so
-        // averaging leaves every one of them flat.
-        geometry.computeVertexNormals();
-        // The rim vertices sit past the six faces, so face N is no longer simply
-        // a slice of the whole buffer. Anything walking faces by index needs to
-        // be told where they stop.
-        geometry.userData.faceVertexCount = 4;
-        box.dispose();
-        return geometry;
+        // One cap per corner, closing the hole the strips leave around it.
+        for (let at = 0; at < corners.length; at++) {
+            const meeting = pulled
+                .map((moved, face) => ({ face, point: moved.get(at) }))
+                .filter((entry) => entry.point) as Array<{ face: number; point: THREE.Vector3 }>;
+            if (meeting.length < 3) continue;
+
+            const out = corners[at].clone().normalize();
+            const across = meeting[0].point.clone()
+                .sub(corners[at]).sub(out.clone().multiplyScalar(meeting[0].point.clone().sub(corners[at]).dot(out)))
+                .normalize();
+            const along = new THREE.Vector3().crossVectors(out, across);
+            meeting.sort((x, y) => {
+                const ox = x.point.clone().sub(corners[at]);
+                const oy = y.point.clone().sub(corners[at]);
+                return Math.atan2(ox.dot(along), ox.dot(across)) - Math.atan2(oy.dot(along), oy.dot(across));
+            });
+            patch(meeting.map((entry) => entry.point));
+        }
+
+        const out = new THREE.BufferGeometry();
+        out.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        if (uvAttribute) out.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+        out.setIndex(indices);
+        // Safe to derive: no numbered face shares a vertex with a strip or a
+        // cap, so averaging leaves every one of them flat.
+        out.computeVertexNormals();
+        out.userData.faceVertexCount = perFace;
+        // Which corner of the die each numbered vertex used to sit on. Pulling
+        // the faces apart is what makes room for the rim, and it also means they
+        // no longer share vertices - so the corner a face omits, which is the
+        // whole of how a d4 is read, cannot be recovered from the result. Keep
+        // the answer from before the faces moved.
+        out.userData.cornerOf = cornerOf.slice(0, faceCount * perFace);
+        geometry.dispose();
+        return out;
     }
 
     private createGeometryForDiceType(diceType: string): THREE.BufferGeometry {
@@ -1707,21 +1789,36 @@ export class D20Dice {
         const scale = this.settings.diceScales[diceType as keyof typeof this.settings.diceScales] || 1.0;
         const size = baseSize * scale;
 
+        let geometry: THREE.BufferGeometry;
         switch (diceType) {
             case 'd4':
-                return new THREE.TetrahedronGeometry(size, 0);
+                geometry = new THREE.TetrahedronGeometry(size, 0);
+                break;
             case 'd6':
-                return this.createChamferedBox(size, size * 0.1);
+                geometry = new THREE.BoxGeometry(size * 2, size * 2, size * 2);
+                break;
             case 'd8':
-                return new THREE.OctahedronGeometry(size, 0);
+                geometry = new THREE.OctahedronGeometry(size, 0);
+                break;
             case 'd10':
-                return this.createD10PolyhedronGeometry(size);
+                geometry = this.createD10PolyhedronGeometry(size);
+                break;
             case 'd12':
-                return new THREE.DodecahedronGeometry(size, 0);
+                geometry = new THREE.DodecahedronGeometry(size, 0);
+                break;
             case 'd20':
             default:
-                return new THREE.IcosahedronGeometry(size, 0);
+                geometry = new THREE.IcosahedronGeometry(size, 0);
+                break;
         }
+
+        if (!this.settings.beveledDice) return geometry;
+        return this.chamferGeometry(
+            geometry,
+            this.getFaceCountForDiceType(diceType),
+            size * BEVEL_DEPTH,
+            RIM_UV[diceType] || RIM_UV.default
+        );
     }
 
     /**
@@ -1792,7 +1889,10 @@ export class D20Dice {
         const uv = geometry.attributes.uv;
         if (!uv) return false;
 
-        const verticesPerFace = uv.count / numbers.length;
+        // A bevelled die parks its rim after the numbered faces, so the buffer
+        // no longer divides evenly into them; it says how long a face is.
+        const verticesPerFace = (geometry.userData.faceVertexCount as number)
+            || uv.count / numbers.length;
         if (!Number.isInteger(verticesPerFace)) return false;
         const position = geometry.attributes.position;
 
@@ -1902,6 +2002,14 @@ export class D20Dice {
                 points[2].clone().sub(points[0])
             )
             .normalize();
+        // Point it outward before using it. Taken from the first three vertices
+        // as they happen to be written, this normal points whichever way that
+        // triangle is wound, and the two halves of a d10 are not wound the same
+        // way. An inward normal reverses the walk, which mirrors the face - and
+        // a mirrored kite has exactly the edge lengths of an unmirrored one, so
+        // it survives every check that measures the shape. Five of the ten faces
+        // came out back to front.
+        if (normal.dot(centre) < 0) normal.negate();
         const across = corners[0].clone().sub(centre).normalize();
         const along = new THREE.Vector3().crossVectors(normal, across);
 
@@ -1938,20 +2046,31 @@ export class D20Dice {
         faceCount: number
     ): number[] {
         const position = geometry.attributes.position;
-        const corners: THREE.Vector3[] = [];
-        const cornerOf: number[] = [];
+        const numbered = faceCount * verticesPerFace;
 
-        for (let v = 0; v < position.count; v++) {
-            const point = new THREE.Vector3().fromBufferAttribute(position, v);
-            let at = corners.findIndex((c) => c.distanceToSquared(point) < 1e-8);
-            if (at < 0) at = corners.push(point) - 1;
-            cornerOf.push(at);
+        // A bevelled die has had its faces pulled apart to make room for the
+        // rim, so they no longer share vertices and which corner is which cannot
+        // be read back off the positions - every face would look like it had
+        // three corners of its own, nothing would be omitted, and the d4 lost
+        // its digits entirely. The chamfer keeps the answer from before it moved
+        // them.
+        const kept = geometry.userData.cornerOf as number[] | undefined;
+        const cornerOf: number[] = kept ? kept.slice(0, numbered) : [];
+        if (!kept) {
+            const corners: THREE.Vector3[] = [];
+            for (let v = 0; v < numbered; v++) {
+                const point = new THREE.Vector3().fromBufferAttribute(position, v);
+                let at = corners.findIndex((c) => c.distanceToSquared(point) < 1e-8);
+                if (at < 0) at = corners.push(point) - 1;
+                cornerOf.push(at);
+            }
         }
+        const cornerCount = Math.max(...cornerOf) + 1;
 
-        const numberOfCorner = new Array<number>(corners.length).fill(0);
+        const numberOfCorner = new Array<number>(cornerCount).fill(0);
         for (let f = 0; f < faceCount; f++) {
             const touched = new Set(cornerOf.slice(f * verticesPerFace, (f + 1) * verticesPerFace));
-            for (let c = 0; c < corners.length; c++) {
+            for (let c = 0; c < cornerCount; c++) {
                 if (!touched.has(c)) numberOfCorner[c] = f + 1;
             }
         }
@@ -2583,8 +2702,14 @@ export class D20Dice {
         const perFace = (geometry.userData.faceVertexCount as number)
             || (atlas ? pos.count / atlas.faces.length : 3);
         const normals: THREE.Vector3[] = [];
+        // Numbered faces only. A bevelled die's rim sits behind them in the same
+        // buffer, and walking the whole thing hands back a normal per rim facet
+        // too: a d8 came back with thirty-two faces, and the result check duly
+        // found a rim strip pointing more upward than any face and reported the
+        // number belonging to whatever came first.
+        const numbered = atlas ? atlas.faces.length * perFace : pos.count;
 
-        for (let base = 0; base + 2 < pos.count; base += perFace) {
+        for (let base = 0; base + 2 < numbered; base += perFace) {
             const a = new THREE.Vector3().fromBufferAttribute(pos, base);
             const b = new THREE.Vector3().fromBufferAttribute(pos, base + 1);
             const c = new THREE.Vector3().fromBufferAttribute(pos, base + 2);
@@ -4544,6 +4669,23 @@ export class D20Dice {
             this.container.removeChild(this.windowBorder);
             this.windowBorder = null;
         }
+    }
+
+    /**
+     * Build every die on the table again, keeping the set that was on it.
+     *
+     * updateSettings deliberately leaves the dice alone - it hands the renderer
+     * new numbers, and a die's geometry is not one of them. Anything that
+     * changes the shape rather than the look has to come through here instead.
+     * Where the dice were is not worth preserving: they are laid out again from
+     * scratch, which is what happens when one is added anyway.
+     */
+    public rebuildDice(): void {
+        const present = this.diceTypeArray.slice();
+        if (!present.length) return;
+        this.clearAllDice();
+        for (const type of present) this.createSingleDice(type);
+        this.wake();
     }
 
     public updateSettings(newSettings: DiceSettings) {

@@ -90,6 +90,9 @@ export interface DiceSettings {
     // Face detection settings
     faceDetectionTolerance: number;
 
+    /** Take the edges off every die, rather than leaving them sharp. */
+    beveledDice: boolean;
+
     // Highlight settings
     highlightCompletedDice: boolean;
     completedDiceHighlightColor: string;
@@ -210,6 +213,8 @@ export const DEFAULT_SETTINGS: DiceSettings = {
 
     // Face detection defaults
     faceDetectionTolerance: 0.3,
+
+    beveledDice: true,
 
     // Highlight defaults
     // Off by default: the highlight is an emissive wash over the whole die, so
@@ -436,6 +441,20 @@ export class DiceSettingTab extends PluginSettingTab {
         // Dice Configuration Section
         const diceSection = this.createCollapsibleSection(containerEl, 'Dice Configuration', 'dice');
 
+
+        new Setting(diceSection)
+            .setName('Bevelled edges')
+            .setDesc('Take the edges off every die. The tray looks straight down, where a sharp solid reads flat; the rim catches the light and gives it back its depth. Off leaves them sharp.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.beveledDice)
+                .onChange(async (value) => {
+                    this.plugin.settings.beveledDice = value;
+                    await this.plugin.saveSettings();
+                    // The edges are geometry, so the dice have to be rebuilt;
+                    // handing the settings back is not enough on its own.
+                    this.plugin.rebuildDice();
+                    this.plugin.refreshDiceView();
+                }));
 
         new Setting(diceSection)
             .setName('Dice size')
