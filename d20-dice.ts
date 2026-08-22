@@ -152,7 +152,11 @@ const FACE_NUMBERS: Record<string, number[]> = {
     // Opposite faces sum to nine, same idea as the cube's seven. Paired against
     // three.js's own face order (+++ opposite ---, +-+ opposite -+-, and so on)
     // rather than the equator walk the old result table assumed.
-    d8: [1, 2, 3, 4, 7, 8, 5, 6]
+    d8: [1, 2, 3, 4, 7, 8, 5, 6],
+    // Opposite faces sum to twenty-one. three.js pairs an icosahedron's faces
+    // 0-13, 1-12, 2-11, 3-10, 4-14, 5-17, 6-18, 7-19, 8-15 and 9-16, which is
+    // what this table is built around.
+    d20: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 19, 20, 16, 12, 11, 15, 14, 13]
 };
 
 /**
@@ -210,6 +214,35 @@ const ATLAS_POLY: Record<string, { size: number; faces: AtlasFace[] }> = {
             { number: 5, corners: [[148, 512], [443, 512], [296, 768]], turn: 0 },
             { number: 7, corners: [[0, 768], [296, 768], [148, 1024]], turn: 0 },
             { number: 4, corners: [[296, 768], [148, 1024], [443, 1024]], turn: 0 }
+        ]
+    },
+    // Read off the sheet by harness/scripts/net.js rather than fitted: the
+    // triangles here stand on vertical edges at x = 0, 161, 322 and 483 and
+    // step down by 93 a time, which no reading of the strip as rows of
+    // equilateral triangles predicts.
+    d20: {
+        size: 1024,
+        faces: [
+            { number: 15, corners: [[164, 92], [321, 1], [321, 184]], turn: 0 },
+            { number: 5, corners: [[323, 1], [481, 93], [323, 184]], turn: 0 },
+            { number: 10, corners: [[4, 184], [159, 95], [159, 276]], turn: 0 },
+            { number: 12, corners: [[162, 95], [319, 185], [162, 277]], turn: 0 },
+            { number: 2, corners: [[163, 279], [321, 188], [321, 370]], turn: 0 },
+            { number: 18, corners: [[323, 188], [481, 279], [323, 370]], turn: 0 },
+            { number: 8, corners: [[159, 281], [159, 463], [3, 373]], turn: 0 },
+            { number: 20, corners: [[162, 281], [320, 372], [162, 463]], turn: 0 },
+            { number: 14, corners: [[163, 465], [321, 374], [321, 556]], turn: 0 },
+            { number: 4, corners: [[323, 374], [480, 466], [323, 556]], turn: 0 },
+            { number: 16, corners: [[159, 467], [159, 649], [3, 559]], turn: 0 },
+            { number: 6, corners: [[162, 467], [320, 558], [162, 649]], turn: 0 },
+            { number: 9, corners: [[163, 651], [321, 560], [321, 742]], turn: 0 },
+            { number: 11, corners: [[323, 560], [481, 651], [323, 742]], turn: 0 },
+            { number: 3, corners: [[2, 744], [159, 653], [159, 835]], turn: 0 },
+            { number: 19, corners: [[162, 653], [320, 744], [162, 835]], turn: 0 },
+            { number: 1, corners: [[163, 837], [321, 746], [321, 928]], turn: 0 },
+            { number: 13, corners: [[323, 746], [481, 837], [323, 928]], turn: 0 },
+            { number: 17, corners: [[2, 930], [159, 840], [159, 1021]], turn: 0 },
+            { number: 7, corners: [[162, 839], [318, 929], [162, 1021]], turn: 0 }
         ]
     }
 };
@@ -2502,8 +2535,8 @@ export class D20Dice {
                 return faceIndex; // 0-9
 
             case 'd20':
-                // Standard icosahedron face mapping
-                return (faceIndex % 20) + 1;
+                // The same table that placed the art. See FACE_NUMBERS.
+                return FACE_NUMBERS.d20[faceIndex] || 1;
 
             default:
                 // Default: face index + 1 gives face number
