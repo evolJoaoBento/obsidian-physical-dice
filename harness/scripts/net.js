@@ -44,9 +44,23 @@ const px = ctx.getImageData(0, 0, W, H).data;
 // Inside a cell: painted, and lighter than the border drawn around it. The
 // digits are white and pass too, which is what we want - they are part of the
 // cell, and a hole where a digit sits would break the fill.
+//
+// The cut cannot be a fixed number. Sheets in the same pack do not agree on how
+// dark the wash is - 88 on the d6, 52 on the d10 - and a threshold picked for
+// one leaves the other's cells looking like background, which comes back as a
+// handful of tiny regions where the digits are. So take the wash to be whatever
+// value covers most of the painted area and keep everything at least that
+// light; borders are drawn at 0 and fall away on their own.
+const painted = new Uint32Array(256);
+for (let i = 0; i < W * H; i++) {
+    if (px[i * 4 + 3] > 8) painted[px[i * 4]]++;
+}
+let wash = 0;
+for (let v = 1; v < 256; v++) if (painted[v] > painted[wash]) wash = v;
+
 const inside = new Uint8Array(W * H);
 for (let i = 0; i < W * H; i++) {
-    inside[i] = px[i * 4 + 3] > 8 && px[i * 4] >= 60 ? 1 : 0;
+    inside[i] = px[i * 4 + 3] > 8 && px[i * 4] >= wash - 8 ? 1 : 0;
 }
 
 const label = new Int32Array(W * H).fill(-1);

@@ -159,7 +159,11 @@ const FACE_NUMBERS: Record<string, number[]> = {
     d20: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 19, 20, 16, 12, 11, 15, 14, 13],
     // Opposite faces sum to thirteen. three.js pairs a dodecahedron's faces
     // 0-8, 1-4, 2-7, 3-9, 5-11 and 6-10.
-    d12: [1, 2, 3, 4, 11, 5, 6, 10, 12, 9, 7, 8]
+    d12: [1, 2, 3, 4, 11, 5, 6, 10, 12, 9, 7, 8],
+    // A d10 is numbered 0-9 and opposite faces sum to nine. three.js is not
+    // building this one - createD10PolyhedronGeometry is - and it pairs the
+    // kites 0-7, 1-8, 2-9, 3-5 and 4-6.
+    d10: [0, 1, 2, 3, 4, 6, 5, 9, 8, 7]
 };
 
 /**
@@ -266,6 +270,24 @@ const ATLAS_POLY: Record<string, { size: number; faces: AtlasFace[] }> = {
             { number: 8, corners: [[313, 696], [429, 658], [503, 759], [431, 858], [313, 820]], turn: 0 },
             { number: 9, corners: [[1, 797], [118, 759], [189, 863], [119, 959], [1, 921]], turn: 0 },
             { number: 7, corners: [[194, 860], [312, 822], [384, 921], [312, 1022], [194, 984]], turn: 0 }
+        ]
+    },
+    // Ten kites in a zigzag strip. Not regular polygons, but a kite is
+    // convex, so sorting its corners by angle about the centre still walks
+    // them the way round they go.
+    d10: {
+        size: 1024,
+        faces: [
+            { number: 0, corners: [[257, 1], [463, 92], [257, 184], [211, 93]], turn: 0 },
+            { number: 7, corners: [[209, 94], [255, 187], [209, 277], [7, 188]], turn: 0 },
+            { number: 4, corners: [[257, 188], [464, 279], [257, 370], [211, 279]], turn: 0 },
+            { number: 1, corners: [[2, 372], [209, 280], [255, 371], [210, 462]], turn: 0 },
+            { number: 6, corners: [[257, 374], [464, 465], [257, 556], [211, 465]], turn: 0 },
+            { number: 9, corners: [[2, 558], [210, 468], [255, 559], [207, 649]], turn: 0 },
+            { number: 2, corners: [[257, 560], [464, 651], [257, 742], [211, 652]], turn: 0 },
+            { number: 5, corners: [[203, 655], [255, 745], [209, 836], [8, 747]], turn: 0 },
+            { number: 8, corners: [[257, 746], [463, 838], [260, 928], [211, 838]], turn: 0 },
+            { number: 3, corners: [[208, 839], [255, 931], [209, 1022], [3, 931]], turn: 0 }
         ]
     }
 };
@@ -2618,9 +2640,13 @@ export class D20Dice {
                 // The same table that placed the art. See FACE_NUMBERS.
                 return FACE_NUMBERS.d8[faceIndex] || 1;
 
-            case 'd10':
-                // D10 uses 0-9 or 00-90
-                return faceIndex; // 0-9
+            case 'd10': {
+                // The same table that placed the art. See FACE_NUMBERS. Written
+                // out rather than defaulted with `||`, because a d10 really does
+                // have a face reading zero and `||` would call it a one.
+                const d10 = FACE_NUMBERS.d10[faceIndex];
+                return d10 === undefined ? 0 : d10;
+            }
 
             case 'd12':
                 // The same table that placed the art. See FACE_NUMBERS.
