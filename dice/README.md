@@ -39,8 +39,9 @@ The sheets that ship here are 1024x1024 with the net drawn once, unfolded.
   "name": "Default",
   "color": "#ff4444",           // the whole set, unless a die says otherwise
 
-  // Edges taken off every die. depth is a share of the die's half-size.
-  "bevel": { "enabled": true, "depth": 0.1 },
+  // Edges taken off every die. depth is a share of the die's half-size;
+  // smooth rounds the rim's shading, 0 flat to 1 fully round.
+  "bevel": { "enabled": true, "depth": 0.1, "smooth": 1 },
 
   // How the set is finished.
   "material": { "shininess": 100, "specular": "#222222",
@@ -123,6 +124,20 @@ rendered die rather than reasoned about.
 corner its resting face leaves out, and every cell carries three digits - one by
 each corner - instead of one in the middle. Setting `vertices` names the die
 corner each cell corner belongs to, and `turn` and `mirror` are then ignored.
+
+### bevel.smooth
+
+A chamfer built the obvious way is a ring of flat facets, and flat facets read
+as exactly that - the edge stops being sharp and starts being a bevel, which is
+a different hard edge. `smooth` fixes that without a single extra vertex: it
+averages the normals meeting along the rim so the light travels continuously
+across it and off onto the face, which is what a rounded edge looks like. The
+silhouette stays faceted, but at a tenth of a die nobody is reading the
+silhouette.
+
+0 leaves the chamfer flat, 1 rounds it fully. It does nothing when `enabled` is
+false - with no rim there is nothing to round, and bending a numbered face's
+normals would only shade its digit unevenly.
 
 ### rimUV
 

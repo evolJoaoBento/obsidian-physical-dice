@@ -219,7 +219,12 @@ export interface DicePack {
     name?: string;
     /** What the set is made of, unless a die says otherwise. */
     color?: string;
-    bevel?: { enabled?: boolean; depth?: number };
+    /**
+     * Edges taken off. `smooth` rounds the rim's shading from 0 (a flat
+     * chamfer) to 1 (light running continuously round the corner), and costs
+     * nothing: it changes normals, not geometry.
+     */
+    bevel?: { enabled?: boolean; depth?: number; smooth?: number };
     material?: { shininess?: number; specular?: string; transparent?: boolean; opacity?: number };
     dice?: Record<string, PackDie>;
 }
@@ -231,7 +236,7 @@ const PACK_FALLBACK: Required<Pick<PackDie, 'scale' | 'rimUV' | 'color'>> = {
     color: '#ff4444'
 };
 
-const BEVEL_FALLBACK = { enabled: true, depth: 0.1 };
+const BEVEL_FALLBACK = { enabled: true, depth: 0.1, smooth: 0 };
 
 
 export class D20Dice {
@@ -1533,6 +1538,59 @@ export class D20Dice {
     }
 
     /**
+     * Round the rim off, without a single extra vertex.
+     *
+     * A chamfer built the obvious way is a ring of flat facets, and flat facets
+     * read as exactly that: the edge stops being sharp and starts being a
+     * bevel, which is a different hard edge. Real dice do not have either - the
+     * light slides round the corner.
+     *
+     * Nothing here changes the shape. Every rim vertex sits on top of vertices
+     * belonging to its neighbours - the facets either side of it, and the
+     * numbered face it runs alongside - so averaging the normals that meet at a
+     * point and pointing all of them the same way makes the light travel
+     * continuously across the rim and off onto the face. The silhouette stays
+     * faceted, but at a tenth of a die nobody is reading the silhouette.
+     *
+     * Numbered faces are left alone. They are the part being read, they are
+     * meant to be flat, and bending their normals would shade the digit
+     * unevenly. Only the rim gets it, so the join is one-sided: the rim leans
+     * towards the face it meets and the face does not lean back.
+     */
+    private softenRim(geometry: THREE.BufferGeometry, rimStart: number, smooth: number): void {
+        if (smooth <= 0) return;
+        const position = geometry.attributes.position;
+        const normal = geometry.attributes.normal;
+
+        // Normals meeting at each point, from the whole die - the numbered faces
+        // included, which is what lets the rim blend into them.
+        const points: THREE.Vector3[] = [];
+        const summed: THREE.Vector3[] = [];
+        const at: number[] = [];
+        const point = new THREE.Vector3();
+        for (let v = 0; v < position.count; v++) {
+            point.fromBufferAttribute(position, v);
+            let found = points.findIndex((p) => p.distanceToSquared(point) < 1e-8);
+            if (found < 0) {
+                found = points.push(point.clone()) - 1;
+                summed.push(new THREE.Vector3());
+            }
+            at.push(found);
+            summed[found].add(new THREE.Vector3().fromBufferAttribute(normal, v));
+        }
+
+        const flat = new THREE.Vector3();
+        for (let v = rimStart; v < position.count; v++) {
+            const shared = summed[at[v]];
+            if (shared.lengthSq() < 1e-12) continue;
+            flat.fromBufferAttribute(normal, v);
+            flat.lerp(shared.clone().normalize(), smooth).normalize();
+            normal.setXYZ(v, flat.x, flat.y, flat.z);
+        }
+        normal.needsUpdate = true;
+    }
+
+    /**
      * Take the edges off a die.
      *
      * Real dice are not sharp, and under this tray's orthographic camera - which
@@ -1560,7 +1618,8 @@ export class D20Dice {
         source: THREE.BufferGeometry,
         faceCount: number,
         bevel: number,
-        rimUV: [number, number]
+        rimUV: [number, number],
+        smooth: number
     ): THREE.BufferGeometry {
         const geometry = source.index ? source.toNonIndexed() : source;
         if (geometry !== source) source.dispose();
@@ -1702,6 +1761,7 @@ export class D20Dice {
         // Safe to derive: no numbered face shares a vertex with a strip or a
         // cap, so averaging leaves every one of them flat.
         out.computeVertexNormals();
+        this.softenRim(out, faceCount * perFace, smooth);
         out.userData.faceVertexCount = perFace;
         // Which corner of the die each numbered vertex used to sit on. Pulling
         // the faces apart is what makes room for the rim, and it also means they
@@ -1747,7 +1807,8 @@ export class D20Dice {
             geometry,
             this.getFaceCountForDiceType(diceType),
             size * (bevel.depth ?? BEVEL_FALLBACK.depth),
-            this.packDie(diceType).rimUV || PACK_FALLBACK.rimUV
+            this.packDie(diceType).rimUV || PACK_FALLBACK.rimUV,
+            Math.min(1, Math.max(0, bevel.smooth ?? BEVEL_FALLBACK.smooth))
         );
     }
 

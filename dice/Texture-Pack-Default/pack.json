@@ -3,7 +3,8 @@
   "color": "#ff4444",
   "bevel": {
     "enabled": true,
-    "depth": 0.1
+    "depth": 0.1,
+    "smooth": 1
   },
   "material": {
     "shininess": 100,
