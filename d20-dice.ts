@@ -186,12 +186,23 @@ interface AtlasFace {
  * values ship paired so opposite faces sum the way a die's should.
  */
 export interface PackDie {
+    /**
+     * Which solid to build, when it is not the one the die is named after.
+     *
+     * A percentile die is a d10 with different numbers on it, not a different
+     * shape, so it says `"geometry": "d10"` and gets the same hull, the same
+     * ten faces and the same blob shadow. Everything else about it - its art,
+     * its numbers, its size - is still its own.
+     */
+    geometry?: string;
     /** Face sheet, relative to the pack folder. */
     texture?: string;
     /** Normal map, same folder, optional. */
     normal?: string;
     /** Size relative to the other dice in the set. */
     scale?: number;
+    /** This die's own colour, for a set that is not all one. */
+    color?: string;
     /** A patch of sheet with nothing on it, for a bevel's rim to wear. */
     rimUV?: [number, number];
     /** Number per geometry face. See above. */
@@ -206,15 +217,18 @@ export interface PackDie {
 
 export interface DicePack {
     name?: string;
+    /** What the set is made of, unless a die says otherwise. */
+    color?: string;
     bevel?: { enabled?: boolean; depth?: number };
     material?: { shininess?: number; specular?: string; transparent?: boolean; opacity?: number };
     dice?: Record<string, PackDie>;
 }
 
 /** What a die falls back to when its pack says nothing about it. */
-const PACK_FALLBACK: Required<Pick<PackDie, 'scale' | 'rimUV'>> = {
+const PACK_FALLBACK: Required<Pick<PackDie, 'scale' | 'rimUV' | 'color'>> = {
     scale: 1,
-    rimUV: [0.97, 0.97]
+    rimUV: [0.97, 0.97],
+    color: '#ff4444'
 };
 
 const BEVEL_FALLBACK = { enabled: true, depth: 0.1 };
@@ -316,6 +330,23 @@ export class D20Dice {
 
     private scaleFor(diceType: string): number {
         return this.packDie(diceType).scale ?? PACK_FALLBACK.scale;
+    }
+
+    /** The solid a die is built from, which is usually the die itself. */
+    private solidFor(diceType: string): string {
+        return this.packDie(diceType).geometry || diceType;
+    }
+
+    /**
+     * What colour a die is.
+     *
+     * The pack's, not the roller's: a set is red or bone or black the way it is
+     * a particular shape, and a percentile die that does not match the d10 it
+     * pairs with is a different set. A die may still say its own, for a set that
+     * is not all one colour.
+     */
+    private colorFor(diceType: string): string {
+        return this.packDie(diceType).color || this.pack.color || PACK_FALLBACK.color;
     }
     // cannon only consults a Material through a ContactMaterial pair; with none
     // registered every body falls back to world.defaultContactMaterial anyway,
@@ -653,8 +684,9 @@ export class D20Dice {
             const type = this.diceTypeArray[i] || 'd20';
             const scale = this.scaleFor(type);
             const size = this.settings.diceSize * scale;
-            const radius = (BLOB_RADIUS[type] ?? BLOB_RADIUS.d20) * size;
-            const restHeight = (BLOB_REST_HEIGHT[type] ?? BLOB_REST_HEIGHT.d20) * size;
+            const solid = this.solidFor(type);
+            const radius = (BLOB_RADIUS[solid] ?? BLOB_RADIUS.d20) * size;
+            const restHeight = (BLOB_REST_HEIGHT[solid] ?? BLOB_REST_HEIGHT.d20) * size;
 
             // Height above where this type of die sits when it is at rest, so a
             // settled die gets a full-strength blob rather than a nearly one.
@@ -667,7 +699,7 @@ export class D20Dice {
             // Blobs are reused as dice come and go, so the one at this index
             // may have been wearing another type's sprite a frame ago.
             const material = blob.material as THREE.MeshBasicMaterial;
-            const sprite = this.blobSprite(BLOB_CORE_BY_TYPE[type] ?? BLOB_CORE);
+            const sprite = this.blobSprite(BLOB_CORE_BY_TYPE[this.solidFor(type)] ?? BLOB_CORE);
             if (material.map !== sprite) {
                 material.map = sprite;
                 material.needsUpdate = true;
@@ -730,7 +762,7 @@ export class D20Dice {
 
         // Create a basic fallback material with all configured properties
         const fallbackMaterialProps: any = {
-            color: this.settings.diceColor,
+            color: this.colorFor(this.settings.diceType),
             ...this.packFinish()
         };
 
@@ -1456,7 +1488,7 @@ export class D20Dice {
     // ============================================================================
 
     private getFaceCountForDiceType(diceType: string): number {
-        switch (diceType) {
+        switch (this.solidFor(diceType)) {
             case 'd4': return 4;
             case 'd6': return 6;
             case 'd8': return 8;
@@ -1687,7 +1719,7 @@ export class D20Dice {
         const size = baseSize * scale;
 
         let geometry: THREE.BufferGeometry;
-        switch (diceType) {
+        switch (this.solidFor(diceType)) {
             case 'd4':
                 geometry = new THREE.TetrahedronGeometry(size, 0);
                 break;
@@ -2010,7 +2042,7 @@ export class D20Dice {
         }
     }
 
-    /** How the set is finished. Colour is the roller's; the rest is the pack's. */
+    /** How the set is finished. */
     private packFinish(): { shininess: number; specular: string; transparent: boolean; opacity: number } {
         const finish = this.pack.material || {};
         return {
@@ -2023,14 +2055,14 @@ export class D20Dice {
 
     private createMaterialForDiceType(diceType: string): THREE.MeshPhongMaterial {
         const materialProps: any = {
-            color: this.settings.diceColor,
+            color: this.colorFor(diceType),
             ...this.packFinish()
         };
 
         // Apply dice texture if available
         const textureData = this.getDiceTextureDataForType(diceType);
         if (textureData) {
-            const texture = this.loadTextureFromData(textureData);
+            const texture = this.loadTextureFromData(textureData, this.colorFor(diceType));
             if (texture) {
                 materialProps.map = texture;
                 // The die colour is already painted into the texture. Leaving it
@@ -2095,8 +2127,8 @@ export class D20Dice {
      * whatever colour the die is. The material then has to be left white or the
      * old multiply comes straight back.
      */
-    private loadTextureFromData(textureData: string): THREE.Texture | null {
-        const key = `${textureData}|${this.settings.diceColor}`;
+    private loadTextureFromData(textureData: string, color: string): THREE.Texture | null {
+        const key = `${textureData}|${color}`;
         const cached = this.textureCache.get(key);
         if (cached) return cached;
 
@@ -2107,7 +2139,7 @@ export class D20Dice {
         // Until the art decodes the die wears its plain colour, not a black or
         // untextured flash.
         canvas.width = canvas.height = 1;
-        ctx.fillStyle = this.settings.diceColor;
+        ctx.fillStyle = color;
         ctx.fillRect(0, 0, 1, 1);
 
         const texture = new THREE.CanvasTexture(canvas);
@@ -2122,7 +2154,7 @@ export class D20Dice {
         img.onload = () => {
             canvas.width = img.width;
             canvas.height = img.height;
-            ctx.fillStyle = this.settings.diceColor;
+            ctx.fillStyle = color;
             ctx.fillRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(img, 0, 0);
             // The placeholder above is 1x1, and the GPU allocation three made
@@ -2208,7 +2240,8 @@ export class D20Dice {
         return body;
     }
 
-    private createPhysicsShapeForDiceType(diceType: string, size: number): CANNON.Shape {
+    private createPhysicsShapeForDiceType(rawType: string, size: number): CANNON.Shape {
+        const diceType = this.solidFor(rawType);
         // Every die of a given type and size has the same hull, and building one
         // costs a whole throwaway BufferGeometry, so keep them.
         const cacheKey = `${diceType}:${size.toFixed(4)}`;
@@ -2797,7 +2830,7 @@ export class D20Dice {
 
         // Sort dice types for consistent output
         const sortedTypes = Object.keys(results).sort((a, b) => {
-            const order = ['d4', 'd6', 'd8', 'd10', 'd12', 'd20'];
+            const order = ['d4', 'd6', 'd8', 'd10', 'd100', 'd12', 'd20'];
             return order.indexOf(a) - order.indexOf(b);
         });
 
@@ -3095,16 +3128,16 @@ export class D20Dice {
         const materialProperties: any = {
             // Textured dice carry their colour in the composite instead; see
             // loadTextureFromData.
-            color: customTexture ? 0xffffff : this.settings.diceColor,
+            color: customTexture ? 0xffffff : this.colorFor(this.settings.diceType),
             ...this.packFinish()
         };
 
         // Add texture if available
         if (customTexture) {
             materialProperties.map = customTexture;
-            log(`Applied custom texture to ${this.settings.diceType} with color tint ${this.settings.diceColor}`);
+            log(`Applied custom texture to ${this.settings.diceType}`);
         } else {
-            log(`Using solid color material for ${this.settings.diceType}: ${this.settings.diceColor}`);
+            log(`Using solid color material for ${this.settings.diceType}`);
         }
 
         // Add normal map if available
@@ -3245,7 +3278,7 @@ export class D20Dice {
      */
     private loadCustomTexture(textureData?: string): THREE.Texture | null {
         if (!textureData) return null;
-        return this.loadTextureFromData(textureData);
+        return this.loadTextureFromData(textureData, this.colorFor(this.settings.diceType));
     }
 
     private getCurrentDiceNormalMapData(): string | null {
@@ -4569,7 +4602,7 @@ export class D20Dice {
         // Update dice material properties
         if (this.dice && this.dice.material) {
             const material = this.dice.material as THREE.MeshPhongMaterial;
-            material.color.setStyle(this.settings.diceColor);
+            material.color.setStyle(this.colorFor(this.settings.diceType));
             const finish = this.packFinish();
             material.shininess = finish.shininess;
             material.specular = new THREE.Color(finish.specular);

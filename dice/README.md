@@ -5,8 +5,9 @@ A pack is a folder in here. It holds the art for a set of dice and a
 new folder under **Dice pack** in the plugin's settings.
 
 Everything about a set lives in its folder. The plugin's settings decide how big
-the dice are overall, what colour they are and where the tray sits; the pack
-decides everything else.
+the dice are overall and where the tray sits; the pack decides everything else,
+colour included - a set is red or bone or black the way it is a particular
+shape.
 
 ## The folder
 
@@ -27,7 +28,7 @@ dice otherwise plain.
 A face sheet is a **mask, not a picture**. Where it is transparent the die shows
 its own colour, so the sheet paints only what is printed on the die: a faint
 wash inside each face and opaque white digits. A fully opaque sheet will hide
-the die's colour entirely and the colour picker will appear to do nothing.
+the die's colour entirely, and `color` below will then appear to do nothing.
 
 The sheets that ship here are 1024x1024 with the net drawn once, unfolded.
 
@@ -36,11 +37,12 @@ The sheets that ship here are 1024x1024 with the net drawn once, unfolded.
 ```jsonc
 {
   "name": "Default",
+  "color": "#ff4444",           // the whole set, unless a die says otherwise
 
   // Edges taken off every die. depth is a share of the die's half-size.
   "bevel": { "enabled": true, "depth": 0.1 },
 
-  // How the set is finished. Colour is the roller's, not the pack's.
+  // How the set is finished.
   "material": { "shininess": 100, "specular": "#222222",
                 "transparent": false, "opacity": 1 },
 
@@ -49,6 +51,7 @@ The sheets that ship here are 1024x1024 with the net drawn once, unfolded.
       "texture": "d6_Numbers.png",
       "normal": "d6_Normal.png",     // optional
       "scale": 0.7,                  // size next to the other dice
+      "color": "#ff4444",            // optional, overrides the set's
       "rimUV": [0.97, 0.97],         // blank sheet for the bevel's rim
       "numbers": [4, 3, 5, 2, 1, 6],
 
@@ -58,6 +61,19 @@ The sheets that ship here are 1024x1024 with the net drawn once, unfolded.
         "cols": 4, "rows": 4,
         "cells": [{ "number": 1, "col": 1, "row": 0, "rotation": 3 }]
       }
+    },
+
+    // A percentile die is a d10 with different numbers on it, not a different
+    // shape. Say so and it gets the same hull, the same ten faces and the same
+    // shadow, while keeping its own art, numbers and size.
+    "d100": {
+      "geometry": "d10",
+      "texture": "d10_Percent_Numbers.png",
+      "numbers": [0, 10, 20, 30, 40, 60, 50, 90, 80, 70],
+      "sheetSize": 1024,
+      "faces": [
+        { "number": 0, "corners": [[257, 1], [463, 92], [257, 184], [211, 93]], "turn": 0 }
+      ]
     },
 
     "d20": {
@@ -75,6 +91,16 @@ The sheets that ship here are 1024x1024 with the net drawn once, unfolded.
 }
 ```
 
+### geometry
+
+Which solid to build, when it is not the one the die is named after. This is
+what makes a percentile die possible: it is a retextured d10, so it says
+`"geometry": "d10"` and everything shape-derived - the collision hull, the face
+count, the blob shadow - follows the d10 rather than looking for a hundred-sided
+solid that does not exist.
+
+A die named after a solid the plugin knows needs no `geometry`.
+
 ### numbers
 
 Which number each face carries, in **three.js's face order** - not the art's.
@@ -83,7 +109,8 @@ values ship paired so opposite faces sum the way a die's should (7 on a d6, 9 on
 a d8 and d10, 13 on a d12, 21 on a d20). Reorder them and the die still works,
 but its opposite faces stop adding up.
 
-A d10 counts from zero and really does have a face reading zero.
+A d10 counts from zero and really does have a face reading zero. A percentile
+die counts 00 to 90 and its opposite faces sum to 90.
 
 ### turn, mirror, vertices
 

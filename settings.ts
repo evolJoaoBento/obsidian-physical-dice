@@ -21,7 +21,6 @@ export interface DiceSettings {
     // Dice configuration
     diceType: 'd4' | 'd6' | 'd8' | 'd10' | 'd12' | 'd20'; // Legacy - will be removed
     diceSize: number;
-    diceColor: string;
 
     // Multi-dice counts (how many of each type)
     diceCounts: {
@@ -29,6 +28,7 @@ export interface DiceSettings {
         d6: number;
         d8: number;
         d10: number;
+        d100: number;
         d12: number;
         d20: number;
     };
@@ -97,7 +97,6 @@ export const DEFAULT_SETTINGS: DiceSettings = {
     // Dice defaults
     diceType: 'd20', // Legacy - will be removed
     diceSize: 0.8,
-    diceColor: '#ff4444',
 
     // Multi-dice counts defaults (start with no dice)
     diceCounts: {
@@ -105,6 +104,7 @@ export const DEFAULT_SETTINGS: DiceSettings = {
         d6: 0,
         d8: 0,
         d10: 0,
+        d100: 0,
         d12: 0,
         d20: 0
     },
@@ -394,17 +394,6 @@ export class DiceSettingTab extends PluginSettingTab {
                 .setDynamicTooltip()
                 .onChange(async (value) => {
                     this.plugin.settings.diceSize = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(diceSection)
-            .setName('Dice color')
-            .setDesc('Base color of the dice (applies as tint with textures)')
-            .addColorPicker(color => color
-                .setValue(this.plugin.settings.diceColor)
-                .onChange(async (value) => {
-                    this.plugin.settings.diceColor = value;
                     await this.plugin.saveSettings();
                     this.plugin.refreshDiceView();
                 }));

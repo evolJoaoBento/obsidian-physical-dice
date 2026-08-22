@@ -132,6 +132,7 @@ export default class D20DicePlugin extends Plugin {
             { key: 'd6', name: 'D6' },
             { key: 'd8', name: 'D8' },
             { key: 'd10', name: 'D10' },
+            { key: 'd100', name: 'D100' },
             { key: 'd12', name: 'D12' },
             { key: 'd20', name: 'D20' }
         ];
@@ -502,7 +503,7 @@ export default class D20DicePlugin extends Plugin {
     }
 
     /** Die types a pack can carry art for. */
-    private static readonly PACK_TYPES = ['d4', 'd6', 'd8', 'd10', 'd12', 'd20'];
+    private static readonly PACK_TYPES = ['d4', 'd6', 'd8', 'd10', 'd100', 'd12', 'd20'];
 
     /**
      * Resource URLs for the selected texture pack, keyed by die type.
