@@ -219,6 +219,72 @@ try {
         dice.blobShadows.length === dice.diceArray.length,
         `${dice.blobShadows.length} blobs / ${dice.diceArray.length} dice`);
 
+    // --- clickthrough -------------------------------------------------------
+    //
+    // The canvas covers the whole note, so it must not swallow clicks. There is
+    // no mode for this any more: pointer-events is flipped per mouse move, off
+    // everywhere except over a die. pointer-events cannot be per-pixel, but it
+    // can be per-move, and a move always precedes the click.
+    const canvasEl = dice.renderer.domElement;
+    const atDie = (i) => {
+        const r = dice.renderer.domElement.getBoundingClientRect();
+        const v = dice.diceArray[i].position.clone().project(dice.camera);
+        return {
+            x: r.left + (v.x * 0.5 + 0.5) * r.width,
+            y: r.top + (-v.y * 0.5 + 0.5) * r.height
+        };
+    };
+    const moveTo = (x, y) => document.dispatchEvent(
+        new MouseEvent('mousemove', { clientX: x, clientY: y, bubbles: true }));
+
+    const canvasRect = canvasEl.getBoundingClientRect();
+    const empty = { x: canvasRect.left + 4, y: canvasRect.top + 4 };
+    moveTo(empty.x, empty.y);
+    record('clicks pass through where there is no die',
+        canvasEl.style.pointerEvents === 'none', canvasEl.style.pointerEvents);
+
+    const over = atDie(0);
+    moveTo(over.x, over.y);
+    record('the canvas takes the click over a die',
+        canvasEl.style.pointerEvents === 'auto', canvasEl.style.pointerEvents);
+
+    moveTo(empty.x, empty.y);
+    record('and lets go again when the pointer leaves',
+        canvasEl.style.pointerEvents === 'none', canvasEl.style.pointerEvents);
+
+    // No mode means no button and no command to get out of step with it.
+    record('the clickthrough button is gone',
+        !panel.querySelector('.dice-clickthrough-button'));
+    record('the clickthrough command is gone',
+        !app.commands.listCommands().some((c) => c.id === 'dsix:toggle-dice-clickthrough'));
+
+    // A held die must reach the tray walls. The drag used to clamp to a
+    // hardcoded +/-9 by +/-6 while the tray is sized from the camera, so on a
+    // maximised window less than half the width could be reached and the die
+    // stopped dead in open space.
+    const reach = (ndcX, ndcY) => {
+        dice.isDragging = true;
+        dice.draggedDiceIndex = 0;
+        dice.mouse.x = ndcX;
+        dice.mouse.y = ndcY;
+        dice.applyDragPosition();
+        dice.isDragging = false;
+        dice.draggedDiceIndex = -1;
+        const b = dice.diceBodyArray[0];
+        return { x: b.position.x, z: b.position.z };
+    };
+    const halfW = (dice.camera.right - dice.camera.left) / 2;
+    const halfL = (dice.camera.top - dice.camera.bottom) / 2;
+    const dieSize = plugin.settings.diceSize *
+        (plugin.settings.diceScales[dice.diceTypeArray[0]] || 1);
+    const corner = reach(1, -1);
+    record('a held die reaches the tray wall',
+        halfW - Math.abs(corner.x) <= dieSize * 1.5 &&
+        halfL - Math.abs(corner.z) <= dieSize * 1.5,
+        `reached ${corner.x.toFixed(1)},${corner.z.toFixed(1)} of ${halfW.toFixed(1)},${halfL.toFixed(1)}`);
+    record('a held die stays inside the tray wall',
+        Math.abs(corner.x) <= halfW && Math.abs(corner.z) <= halfL);
+
     // --- hit testing --------------------------------------------------------
     const rect = dice.renderer.domElement.getBoundingClientRect();
     const target = dice.diceArray[0];

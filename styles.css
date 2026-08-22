@@ -138,10 +138,6 @@
     cursor: default !important;
 }
 
-.dice-floating-container canvas.dice-clickthrough {
-    pointer-events: none !important; /* Allow click-through when not hovering dice */
-}
-
 .dice-floating-container canvas.dice-interactive {
     cursor: grab !important; /* Show grab cursor when over dice */
 }
@@ -524,24 +520,6 @@
     background: var(--background-modifier-error);
     color: white;
     cursor: pointer;
-}
-
-.dice-controls-panel .dice-clickthrough-button {
-    width: 100%;
-    padding: 12px;
-    font-size: 14px;
-    font-weight: bold;
-    border: 2px solid var(--interactive-accent);
-    border-radius: 6px;
-    cursor: pointer;
-    transition: background 0.2s ease;
-    background: var(--background-primary);
-    color: var(--text-normal);
-}
-
-.dice-controls-panel .dice-clickthrough-button.is-active {
-    background: var(--interactive-accent);
-    color: white;
 }
 
 .dice-controls-panel .dice-result-overlay.show {

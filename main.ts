@@ -11,8 +11,6 @@ export default class D20DicePlugin extends Plugin {
     private controlsPanel: HTMLElement | null = null;
     private isDraggingControls = false;
     private controlsDragOffset = { x: 0, y: 0 };
-    private clickthroughState = true;
-    private updateClickthroughCallback: ((enabled: boolean) => void) | null = null;
     private updateRollButtonTextCallback: ((diceType: string) => void) | null = null;
     private updateDiceCountDisplayCallback: (() => void) | null = null;
 
@@ -39,14 +37,6 @@ export default class D20DicePlugin extends Plugin {
             name: 'Toggle D20 Dice Roller',
             callback: () => {
                 this.toggleDiceOverlay();
-            }
-        });
-
-        this.addCommand({
-            id: 'toggle-dice-clickthrough',
-            name: 'Toggle Dice Clickthrough Mode',
-            callback: () => {
-                this.toggleClickthrough();
             }
         });
 
@@ -203,35 +193,10 @@ export default class D20DicePlugin extends Plugin {
             this.refreshDiceView();
         });
 
-        // Clickthrough button section
-        const clickthroughSection = this.controlsPanel.createDiv('dice-section');
-
-        const clickthroughButton = clickthroughSection.createEl('button', {
-            text: 'Clickthrough: ON',
-            cls: 'dice-clickthrough-button'
-        });
-
-        const updateClickthrough = (enabled: boolean) => {
-            this.clickthroughState = enabled;
-            if (this.dice) {
-                // Pass the clickthrough state to the dice component
-                this.dice.setClickthroughMode(enabled);
-            }
-            clickthroughButton.textContent = enabled ? 'Clickthrough: ON' : 'Clickthrough: OFF';
-            clickthroughButton.toggleClass('is-active', enabled);
-        };
-
-        // Store the callbacks for external access
-        this.updateClickthroughCallback = updateClickthrough;
+        // No clickthrough control: the canvas takes the pointer only while it
+        // is over a die, and passes everything else to the note underneath.
         this.updateRollButtonTextCallback = updateRollButtonText;
         this.updateDiceCountDisplayCallback = updateDiceCountDisplay;
-
-        clickthroughButton.addEventListener('click', () => {
-            this.toggleClickthrough();
-        });
-
-        // Initialize to clickthrough state
-        updateClickthrough(true);
 
 
         // Close button
@@ -250,6 +215,7 @@ export default class D20DicePlugin extends Plugin {
 
         // Initialize dice with settings
         this.dice = new D20Dice(diceContainer, this.settings);
+        this.dice.setPackTextures(this.resolvePackTextures());
 
         // Create any dice that are already in the settings (from dice requests)
         Object.entries(this.settings.diceCounts).forEach(([diceType, count]) => {
@@ -536,9 +502,52 @@ export default class D20DicePlugin extends Plugin {
         this.controlsPanel = null;
         this.isDraggingControls = false;
         this.isVisible = false;
-        this.updateClickthroughCallback = null;
         this.updateRollButtonTextCallback = null;
         this.updateDiceCountDisplayCallback = null;
+    }
+
+    /** Die types a pack can carry art for. */
+    private static readonly PACK_TYPES = ['d4', 'd6', 'd8', 'd10', 'd12', 'd20'];
+
+    /**
+     * Resource URLs for the selected texture pack, keyed by die type.
+     *
+     * A pack is a folder under the plugin's own `dice/` directory holding
+     * `<type>_Numbers.png`. `getResourcePath` turns a vault path into an
+     * `app://` URL the texture loader takes as-is, so nothing has to be read,
+     * encoded, or stored - copying a folder and editing the images is the whole
+     * of making a custom set.
+     *
+     * A missing file is not an error: that type simply falls back to whatever
+     * texture the settings hold, or to a plain coloured die.
+     */
+    private resolvePackTextures(): Record<string, string> {
+        const pack = this.settings.texturePack;
+        const dir = this.manifest.dir;
+        if (!pack || !dir) return {};
+
+        const adapter = this.app.vault.adapter;
+        const urls: Record<string, string> = {};
+        for (const type of D20DicePlugin.PACK_TYPES) {
+            const path = `${dir}/dice/${pack}/${type}_Numbers.png`;
+            urls[type] = adapter.getResourcePath(path);
+        }
+        return urls;
+    }
+
+    /** Pack folders available to choose from, for the settings dropdown. */
+    async listTexturePacks(): Promise<string[]> {
+        const dir = this.manifest.dir;
+        if (!dir) return [];
+        try {
+            const listing = await this.app.vault.adapter.list(`${dir}/dice`);
+            return listing.folders
+                .map((folder) => folder.split('/').pop() || '')
+                .filter(Boolean)
+                .sort();
+        } catch {
+            return [];
+        }
     }
 
     private get texturePath(): string {
@@ -645,13 +654,6 @@ export default class D20DicePlugin extends Plugin {
             this.updateRollButtonTextCallback('d20');
         }
     }, 100, true);
-
-    toggleClickthrough() {
-        if (this.isVisible && this.updateClickthroughCallback) {
-            const newState = !this.clickthroughState;
-            this.updateClickthroughCallback(newState);
-        }
-    }
 
     refreshApiIntegration(closeExistingViews = true) {
         // Remove existing chat ribbon icon if it exists
