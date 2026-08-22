@@ -3,17 +3,19 @@
 A feature-rich 3D dice roller plugin for Obsidian with realistic physics simulation and multiplayer dice chat support. Roll dice with stunning 3D graphics, collaborate with other players, and enhance your tabletop RPG sessions directly within Obsidian.
 
 ![Plugin Demo](https://img.shields.io/badge/Obsidian-Plugin-purple)
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Version](https://img.shields.io/badge/version-1.1.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ## Features
 
 ### 🎲 Realistic 3D Dice Physics
-- **Multiple Dice Types**: Support for d4, d6, d8, d10, d12, and d20
+- **Seven Dice Types**: d4, d6, d8, d10, d12, d20 and a percentile d100
 - **True Physics Simulation**: Powered by Three.js and Cannon-es for realistic rolling, bouncing, and settling
 - **Interactive Rolling**: Drag and throw dice with your mouse for natural rolling motion
 - **Caught Dice Detection**: Automatically detects when dice land on edges or unstable positions
 - **Reroll Functionality**: Easily reroll caught dice with visual feedback
+- **Read Off The Die**: Every face carries the number the die reports, from the same table that placed the art, so the two cannot drift apart. A d4 is read at its apex, the way a real one is.
+- **Bevelled Edges**: Edges taken off every die, with the rim's shading rounded so the light travels round the corner rather than breaking at it
 
 ### 💬 Multiplayer Dice Chat
 - **DM/Player Roles**: Built-in role system for Dungeon Masters and Players
@@ -22,10 +24,17 @@ A feature-rich 3D dice roller plugin for Obsidian with realistic physics simulat
 - **Room-based Sessions**: Create or join dice rolling sessions with unique room IDs
 - **Chat Integration**: Send messages alongside dice rolls for context
 
+### 🎨 Dice Packs
+- **A Folder Is A Set**: Copy `dice/Texture-Pack-Default`, edit the art and its `pack.json`, pick it in the settings
+- **The Pack Decides**: Face art, normal maps, colour, per-die size, finish, bevel, and how each net is laid out - all of it travels with the set
+- **Retextures**: A die can borrow another's shape. The percentile die is a d10 with different numbers on it, and says so in one line
+- **Documented**: See [dice/README.md](dice/README.md) for the format and the two tools that work a new pack out
+
 ### ⚙️ Customization & Settings
 - **Motion Threshold**: Adjust sensitivity for dice settling detection
 - **Shadow Effects**: Toggle realistic shadows for enhanced visual appeal
-- **Dice Size**: Customize dice rendering size
+- **Dice Size**: Overall size of the set; the pack sets each die's size within it
+- **Lighting**: Ambient and key light, colour and position
 - **Result Animations**: Enable/disable result highlight animations
 - **API Endpoint Configuration**: Connect to custom dice rolling servers
 
@@ -34,6 +43,25 @@ A feature-rich 3D dice roller plugin for Obsidian with realistic physics simulat
 - **WebGL Context Handling**: Automatic recovery from context loss
 - **Optimized Rendering**: High-performance rendering with configurable quality settings
 - **Copy to Clipboard**: Click any result to copy it instantly
+
+## What's new in 1.1
+
+- **Face art actually works.** A pack's sheets are masks rather than pictures,
+  and were being tinted rather than composited - a red die came out a dark
+  maroon square with a barely brighter numeral on it. Every die type now has its
+  net mapped properly, so the number a die reports is the number printed on the
+  face that is up.
+- **A percentile d100**, as a retextured d10.
+- **Bevelled edges** on every die, with the rim's shading rounded so light
+  travels round the corner. Costs no extra geometry and can be turned off.
+- **Dice packs.** A folder is a set: art, colour, sizes, finish, bevel and the
+  layout of every net travel together in a `pack.json`. Copy the folder to make
+  your own. The settings shrank from fifty-two rows to twenty-nine as a result -
+  everything that describes the dice moved into the pack, and what is left
+  describes the tray.
+- **Blob shadows** in place of the shadow map, tuned per die type.
+- The clickthrough toggle is gone; the canvas takes the pointer only while it is
+  over a die and passes everything else to the note underneath.
 
 ## Installation
 
@@ -121,8 +149,13 @@ Access settings via **Settings → Community Plugins → Physical Dice**
 | **API Endpoint** | Server URL for multiplayer dice chat | `http://localhost:5000` |
 | **Motion Threshold** | Sensitivity for dice settling (lower = more sensitive) | `1.0` |
 | **Enable Shadows** | Render realistic shadows (impacts performance) | `true` |
-| **Dice Size** | Visual size of rendered dice | `1.0` |
+| **Dice pack** | Folder under `dice/` holding the set | `Texture-Pack-Default` |
+| **Dice Size** | Overall size of the set | `0.8` |
 | **Enable Result Animation** | Highlight completed dice | `true` |
+
+Anything about the dice themselves - their colour, each one's size, their
+finish, whether their edges are bevelled, and how the art is laid out on them -
+lives in the pack rather than here. See [dice/README.md](dice/README.md).
 
 ### Server Setup (Optional)
 
@@ -221,7 +254,10 @@ dsix/
 │   ├── api-client.ts        # API client for server communication
 │   ├── settings.ts          # Plugin settings
 │   └── types.ts             # TypeScript type definitions
-├── dice/                    # Dice texture assets
+├── dice/                    # Dice packs: art plus a pack.json describing the set
+│   └── README.md            # Pack format
+├── harness/                 # Drives the real Obsidian over CDP
+│   └── scripts/             # smoke.js, net.js, overlay.js, calibrate.js
 ├── styles.css               # Plugin styles
 ├── manifest.json            # Plugin manifest
 ├── package.json             # NPM dependencies
