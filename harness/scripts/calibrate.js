@@ -18,6 +18,9 @@ const p = app.plugins.plugins.dsix;
 if (!p.isVisible) { app.commands.executeCommandById('dsix:toggle-dice-roller'); await new Promise(r => setTimeout(r, 900)); }
 const d = p.dice;
 
+// Poses faces upward, which is what every type wants except the d4: that one is
+// read at the corner its resting face leaves out, so posing a face up reports
+// the opposite face. Use harness/scripts/rest-d4.js for it.
 const type = window.__type || 'd6';
 const grid = window.__grid || { cols: 4, rows: 4 };
 const faces = d.getFaceCountForDiceType(type);

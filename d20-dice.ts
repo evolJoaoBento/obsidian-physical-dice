@@ -1819,11 +1819,17 @@ export class D20Dice {
             // they repeat, and the order they repeat in says nothing about the
             // way round the pentagon goes. Walking them by angle does.
             const ring = verticesPerFace === sides ? null : this.ringOrderForFace(position, base, verticesPerFace);
+            // The cell has to be anchored by the same rule the face was, or the
+            // two agree on where the walk starts only by luck.
+            const anchor = ring ? this.anchorCorner(cell.corners) : -1;
+            const corners = anchor < 0
+                ? cell.corners
+                : cell.corners.slice(anchor).concat(cell.corners.slice(0, anchor));
 
             for (let v = 0; v < verticesPerFace; v++) {
                 const seat = ring ? ring[v] : v;
                 const step = cell.mirror ? -seat : seat;
-                const corner = cell.corners[(((step + cell.turn) % sides) + sides) % sides];
+                const corner = corners[(((step + cell.turn) % sides) + sides) % sides];
                 // Rows count downwards in the image, upwards in UV space.
                 uv.setXY(base + v, corner[0] / atlas.size, 1 - corner[1] / atlas.size);
             }
@@ -1842,6 +1848,34 @@ export class D20Dice {
      * anything in world space keeps the direction of travel the same for all
      * faces, which is what stops half a die coming out mirrored.
      */
+    /**
+     * The corner a lopsided shape can be lined up by, or -1 if it has none.
+     *
+     * Walking a face's corners in order fixes the direction of travel but not
+     * where the walk starts, and where it starts is decided by whichever vertex
+     * three.js happened to write first. For a triangle or a pentagon that costs
+     * nothing - every corner is like every other, so a different start is only a
+     * rotation, and these faces land at whatever angle they land at anyway.
+     *
+     * A kite has no such symmetry. Start one corner out and its long diagonal is
+     * laid along the sheet's short one: the digit still appears, stretched, so
+     * it survives being looked at. Eight of the d10's ten faces were seated that
+     * way and only the diagonals gave it away. So a shape with one corner
+     * plainly further from the middle than the rest is anchored there, at both
+     * ends of the mapping, and a shape without one is left alone.
+     */
+    private anchorCorner(points: Array<[number, number] | THREE.Vector3>): number {
+        const at = (p: [number, number] | THREE.Vector3) =>
+            Array.isArray(p) ? new THREE.Vector3(p[0], p[1], 0) : p;
+        const centre = points
+            .reduce((sum, p) => sum.add(at(p).clone()), new THREE.Vector3())
+            .divideScalar(points.length);
+        const spans = points.map((p) => at(p).distanceTo(centre));
+        const sorted = spans.slice().sort((a, b) => b - a);
+        if (sorted[0] < sorted[1] * 1.02) return -1;
+        return spans.indexOf(sorted[0]);
+    }
+
     private ringOrderForFace(
         position: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
         base: number,
@@ -1879,8 +1913,12 @@ export class D20Dice {
             .sort((a, b) => a.angle - b.angle)
             .map((entry) => entry.at);
 
+        const anchor = this.anchorCorner(corners);
+        const from = anchor < 0 ? 0 : order.indexOf(anchor);
+        const anchored = order.slice(from).concat(order.slice(0, from));
+
         const seatFor = new Array<number>(corners.length);
-        order.forEach((corner, seat) => { seatFor[corner] = seat; });
+        anchored.forEach((corner, seat) => { seatFor[corner] = seat; });
         return seatOf.map((corner) => seatFor[corner]);
     }
 
