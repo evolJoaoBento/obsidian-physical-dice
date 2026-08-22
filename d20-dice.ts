@@ -156,7 +156,10 @@ const FACE_NUMBERS: Record<string, number[]> = {
     // Opposite faces sum to twenty-one. three.js pairs an icosahedron's faces
     // 0-13, 1-12, 2-11, 3-10, 4-14, 5-17, 6-18, 7-19, 8-15 and 9-16, which is
     // what this table is built around.
-    d20: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 19, 20, 16, 12, 11, 15, 14, 13]
+    d20: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 19, 20, 16, 12, 11, 15, 14, 13],
+    // Opposite faces sum to thirteen. three.js pairs a dodecahedron's faces
+    // 0-8, 1-4, 2-7, 3-9, 5-11 and 6-10.
+    d12: [1, 2, 3, 4, 11, 5, 6, 10, 12, 9, 7, 8]
 };
 
 /**
@@ -243,6 +246,26 @@ const ATLAS_POLY: Record<string, { size: number; faces: AtlasFace[] }> = {
             { number: 13, corners: [[323, 746], [481, 837], [323, 928]], turn: 0 },
             { number: 17, corners: [[2, 930], [159, 840], [159, 1021]], turn: 0 },
             { number: 7, corners: [[162, 839], [318, 929], [162, 1021]], turn: 0 }
+        ]
+    },
+    // Two rings of five pentagons around a centre each, which is how a
+    // dodecahedron unfolds. Same extractor as the d20, asked for five
+    // corners instead of three.
+    d12: {
+        size: 1024,
+        faces: [
+            { number: 3, corners: [[120, 101], [194, 1], [311, 39], [311, 163], [194, 201]], turn: 0 },
+            { number: 2, corners: [[314, 162], [386, 64], [504, 102], [504, 225], [387, 264]], turn: 0 },
+            { number: 5, corners: [[74, 165], [191, 203], [191, 327], [73, 365], [1, 266]], turn: 0 },
+            { number: 1, corners: [[194, 203], [311, 165], [384, 266], [310, 365], [194, 327]], turn: 0 },
+            { number: 4, corners: [[313, 367], [386, 267], [504, 305], [504, 428], [386, 467]], turn: 0 },
+            { number: 6, corners: [[193, 329], [311, 368], [311, 491], [195, 529], [121, 431]], turn: 0 },
+            { number: 10, corners: [[194, 532], [309, 494], [384, 593], [312, 693], [194, 655]], turn: 0 },
+            { number: 11, corners: [[1, 594], [118, 556], [191, 657], [119, 756], [1, 718]], turn: 0 },
+            { number: 12, corners: [[122, 755], [195, 658], [311, 696], [311, 819], [192, 857]], turn: 0 },
+            { number: 8, corners: [[313, 696], [429, 658], [503, 759], [431, 858], [313, 820]], turn: 0 },
+            { number: 9, corners: [[1, 797], [118, 759], [189, 863], [119, 959], [1, 921]], turn: 0 },
+            { number: 7, corners: [[194, 860], [312, 822], [384, 921], [312, 1022], [194, 984]], turn: 0 }
         ]
     }
 };
@@ -1718,22 +1741,83 @@ export class D20Dice {
 
         const verticesPerFace = uv.count / numbers.length;
         if (!Number.isInteger(verticesPerFace)) return false;
+        const position = geometry.attributes.position;
 
         for (let face = 0; face < numbers.length; face++) {
             const cell = atlas.faces.find((f) => f.number === numbers[face]);
             if (!cell) continue;
 
             const sides = cell.corners.length;
+            const base = face * verticesPerFace;
+            // A triangle arrives as three vertices in order and needs no work.
+            // A pentagon does not: three.js hands a dodecahedron's face over as
+            // nine vertices - three triangles cut off a strip, not a fan - so
+            // they repeat, and the order they repeat in says nothing about the
+            // way round the pentagon goes. Walking them by angle does.
+            const ring = verticesPerFace === sides ? null : this.ringOrderForFace(position, base, verticesPerFace);
+
             for (let v = 0; v < verticesPerFace; v++) {
-                const step = cell.mirror ? -v : v;
+                const seat = ring ? ring[v] : v;
+                const step = cell.mirror ? -seat : seat;
                 const corner = cell.corners[(((step + cell.turn) % sides) + sides) % sides];
                 // Rows count downwards in the image, upwards in UV space.
-                uv.setXY(face * verticesPerFace + v, corner[0] / atlas.size, 1 - corner[1] / atlas.size);
+                uv.setXY(base + v, corner[0] / atlas.size, 1 - corner[1] / atlas.size);
             }
         }
 
         uv.needsUpdate = true;
         return true;
+    }
+
+    /**
+     * Seat each of a face's vertices at a corner of its polygon.
+     *
+     * Repeated vertices are collapsed by position, the survivors are sorted by
+     * their angle about the face centre, and every vertex is given the seat its
+     * position earned. Sorting about the face's own normal rather than about
+     * anything in world space keeps the direction of travel the same for all
+     * faces, which is what stops half a die coming out mirrored.
+     */
+    private ringOrderForFace(
+        position: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
+        base: number,
+        count: number
+    ): number[] {
+        const points: THREE.Vector3[] = [];
+        for (let v = 0; v < count; v++) {
+            points.push(new THREE.Vector3().fromBufferAttribute(position, base + v));
+        }
+
+        const corners: THREE.Vector3[] = [];
+        const seatOf = points.map((p) => {
+            let at = corners.findIndex((c) => c.distanceToSquared(p) < 1e-8);
+            if (at < 0) at = corners.push(p) - 1;
+            return at;
+        });
+
+        const centre = corners
+            .reduce((sum, c) => sum.add(c), new THREE.Vector3())
+            .divideScalar(corners.length);
+        const normal = new THREE.Vector3()
+            .crossVectors(
+                points[1].clone().sub(points[0]),
+                points[2].clone().sub(points[0])
+            )
+            .normalize();
+        const across = corners[0].clone().sub(centre).normalize();
+        const along = new THREE.Vector3().crossVectors(normal, across);
+
+        const order = corners
+            .map((c, at) => {
+                const offset = c.clone().sub(centre);
+                return { at, angle: Math.atan2(offset.dot(along), offset.dot(across)) };
+            })
+            .sort((a, b) => a.angle - b.angle)
+            .map((entry) => entry.at);
+
+        const seatFor = new Array<number>(corners.length);
+        order.forEach((corner, seat) => { seatFor[corner] = seat; });
+        return seatOf.map((corner) => seatFor[corner]);
     }
 
     private applyUVMappingForDiceType(geometry: THREE.BufferGeometry, diceType: string): void {
@@ -2350,7 +2434,11 @@ export class D20Dice {
     private deriveFaceNormalsFromGeometry(diceType: string): THREE.Vector3[] {
         const geometry = this.createGeometryForDiceType(diceType);
         const pos = geometry.attributes.position;
-        const perFace = (geometry.userData.faceVertexCount as number) || 3;
+        // A dodecahedron's face is nine vertices, not three, so the stride has
+        // to come from how many faces the atlas says there are.
+        const atlas = ATLAS_POLY[diceType];
+        const perFace = (geometry.userData.faceVertexCount as number)
+            || (atlas ? pos.count / atlas.faces.length : 3);
         const normals: THREE.Vector3[] = [];
 
         for (let base = 0; base + 2 < pos.count; base += perFace) {
@@ -2533,6 +2621,10 @@ export class D20Dice {
             case 'd10':
                 // D10 uses 0-9 or 00-90
                 return faceIndex; // 0-9
+
+            case 'd12':
+                // The same table that placed the art. See FACE_NUMBERS.
+                return FACE_NUMBERS.d12[faceIndex] || 1;
 
             case 'd20':
                 // The same table that placed the art. See FACE_NUMBERS.
