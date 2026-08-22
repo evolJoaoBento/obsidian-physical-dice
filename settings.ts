@@ -640,6 +640,29 @@ export class DiceSettingTab extends PluginSettingTab {
         // Custom Textures Section - always shown
         const textureSection = this.createCollapsibleSection(containerEl, 'Custom Textures', 'textures');
 
+        new Setting(textureSection)
+            .setName('Texture pack')
+            .setDesc('A folder under the plugin\'s dice/ directory holding one sheet per die type. A pack covers every die at once; the uploads below only stand in for what a pack does not supply.')
+            .addDropdown(dropdown => {
+                // display() is synchronous and listing folders is not, so the
+                // pack in use goes in on its own and the rest of the list joins
+                // it a moment later. The control is usable either way.
+                const current = this.plugin.settings.texturePack;
+                dropdown.addOption(current, current || 'None');
+                dropdown.setValue(current);
+                dropdown.onChange(async (value) => {
+                    this.plugin.settings.texturePack = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.applyTexturePack();
+                    this.plugin.refreshDiceView();
+                });
+                this.plugin.listTexturePacks().then((packs) => {
+                    for (const pack of packs) {
+                        if (pack !== current) dropdown.addOption(pack, pack);
+                    }
+                });
+            });
+
         textureSection.createEl('p', {
                 text: 'Upload custom images for each dice type. Images will use appropriate UV mapping based on the dice geometry.',
                 cls: 'setting-item-description'

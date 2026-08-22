@@ -655,6 +655,19 @@ export default class D20DicePlugin extends Plugin {
         }
     }, 100, true);
 
+    /**
+     * Point the dice at a different pack.
+     *
+     * refreshDiceView only hands the settings back to the renderer, and the pack
+     * is not among them: it is a set of resolved `app://` URLs built from the
+     * folder name, so changing the folder has to re-resolve and push them.
+     */
+    applyTexturePack(): void {
+        if (this.dice) {
+            this.dice.setPackTextures(this.resolvePackTextures());
+        }
+    }
+
     refreshApiIntegration(closeExistingViews = true) {
         // Remove existing chat ribbon icon if it exists
         if (this.chatRibbonIcon) {
