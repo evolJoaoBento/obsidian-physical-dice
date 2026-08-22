@@ -5,10 +5,8 @@ const d = p.dice;
 const faceIdx = window.__face ?? 0;
 
 const savedSize = p.settings.diceSize;
-const savedScales = Object.assign({}, p.settings.diceScales);
 try {
     p.settings.diceSize = 3.0;
-    for (const k of Object.keys(p.settings.diceScales)) p.settings.diceScales[k] = 1;
     d.clearAllDice();
     d.createSingleDice('d4');
 
@@ -42,5 +40,4 @@ try {
     };
 } finally {
     p.settings.diceSize = savedSize;
-    Object.assign(p.settings.diceScales, savedScales);
 }

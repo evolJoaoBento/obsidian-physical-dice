@@ -33,22 +33,6 @@ export interface DiceSettings {
         d20: number;
     };
 
-    // Individual dice scaling per type
-    diceScales: {
-        d4: number;
-        d6: number;
-        d8: number;
-        d10: number;
-        d12: number;
-        d20: number;
-    };
-
-    // Material properties
-    diceShininess: number;
-    diceSpecular: string;
-    diceTransparent: boolean;
-    diceOpacity: number;
-
     // Shadow settings
     enableShadows: boolean;
 
@@ -61,26 +45,6 @@ export interface DiceSettings {
     directionalLightPositionY: number;
     directionalLightPositionZ: number;
 
-    // Per-dice-type textures
-    diceTextures: {
-        d4: string;
-        d6: string;
-        d8: string;
-        d10: string;
-        d12: string;
-        d20: string;
-    };
-
-    // Per-dice-type normal maps
-    diceNormalMaps: {
-        d4: string;
-        d6: string;
-        d8: string;
-        d10: string;
-        d12: string;
-        d20: string;
-    };
-
     // Animation settings
     enableResultAnimation: boolean;
 
@@ -89,9 +53,6 @@ export interface DiceSettings {
 
     // Face detection settings
     faceDetectionTolerance: number;
-
-    /** Take the edges off every die, rather than leaving them sharp. */
-    beveledDice: boolean;
 
     // Highlight settings
     highlightCompletedDice: boolean;
@@ -148,25 +109,6 @@ export const DEFAULT_SETTINGS: DiceSettings = {
         d20: 0
     },
 
-    // Individual dice scaling defaults
-    diceScales: {
-        // A d6 is BoxGeometry(size * 2), so at an equal scale it reads far
-        // larger than the others; a d4 rests on a triangle and reads smaller.
-        // These bring the set to a consistent apparent size.
-        d4: 1.1,
-        d6: 0.7,
-        d8: 1.0,
-        d10: 1.0,
-        d12: 1.0,
-        d20: 1.0
-    },
-
-    // Material defaults
-    diceShininess: 100,
-    diceSpecular: '#222222',
-    diceTransparent: false,
-    diceOpacity: 1.0,
-
     // Shadow defaults
     enableShadows: true,
 
@@ -185,26 +127,6 @@ export const DEFAULT_SETTINGS: DiceSettings = {
     directionalLightPositionY: 35,
     directionalLightPositionZ: 0,
 
-    // Per-dice-type texture defaults
-    diceTextures: {
-        d4: '',
-        d6: '',
-        d8: '',
-        d10: '',
-        d12: '',
-        d20: ''
-    },
-
-    // Per-dice-type normal map defaults
-    diceNormalMaps: {
-        d4: '',
-        d6: '',
-        d8: '',
-        d10: '',
-        d12: '',
-        d20: ''
-    },
-
     // Animation defaults
     enableResultAnimation: true,
 
@@ -213,8 +135,6 @@ export const DEFAULT_SETTINGS: DiceSettings = {
 
     // Face detection defaults
     faceDetectionTolerance: 0.3,
-
-    beveledDice: true,
 
     // Highlight defaults
     // Off by default: the highlight is an emissive wash over the whole die, so
@@ -443,18 +363,27 @@ export class DiceSettingTab extends PluginSettingTab {
 
 
         new Setting(diceSection)
-            .setName('Bevelled edges')
-            .setDesc('Take the edges off every die. The tray looks straight down, where a sharp solid reads flat; the rim catches the light and gives it back its depth. Off leaves them sharp.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.beveledDice)
-                .onChange(async (value) => {
-                    this.plugin.settings.beveledDice = value;
+            .setName('Dice pack')
+            .setDesc('A folder under the plugin’s dice/ directory. Its pack.json describes the whole set - the face sheets and normal maps to use, how the art is laid out on each die, how big each one is, how it is finished, and whether its edges are taken off. Copy the folder and edit it to make your own.')
+            .addDropdown(dropdown => {
+                // display() is synchronous and listing folders is not, so the
+                // pack in use goes in on its own and the rest of the list joins
+                // it a moment later. The control is usable either way.
+                const current = this.plugin.settings.texturePack;
+                dropdown.addOption(current, current || 'None');
+                dropdown.setValue(current);
+                dropdown.onChange(async (value) => {
+                    this.plugin.settings.texturePack = value;
                     await this.plugin.saveSettings();
-                    // The edges are geometry, so the dice have to be rebuilt;
-                    // handing the settings back is not enough on its own.
-                    this.plugin.rebuildDice();
+                    await this.plugin.applyTexturePack();
                     this.plugin.refreshDiceView();
-                }));
+                });
+                this.plugin.listTexturePacks().then((packs) => {
+                    for (const pack of packs) {
+                        if (pack !== current) dropdown.addOption(pack, pack);
+                    }
+                });
+            });
 
         new Setting(diceSection)
             .setName('Dice size')
@@ -469,23 +398,6 @@ export class DiceSettingTab extends PluginSettingTab {
                     this.plugin.refreshDiceView();
                 }));
 
-        // Individual dice type scaling
-        const diceScaleTypes = ['d4', 'd6', 'd8', 'd10', 'd12', 'd20'];
-        diceScaleTypes.forEach(diceType => {
-            new Setting(diceSection)
-                .setName(`${diceType.toUpperCase()} scale`)
-                .setDesc(`Individual scaling for ${diceType.toUpperCase()} dice (0.5 = small, 2.0 = large)`)
-                .addSlider(slider => slider
-                    .setLimits(0.3, 2.0, 0.1)
-                    .setValue((this.plugin.settings.diceScales as any)[diceType])
-                    .setDynamicTooltip()
-                    .onChange(async (value) => {
-                        (this.plugin.settings.diceScales as any)[diceType] = value;
-                        await this.plugin.saveSettings();
-                        this.plugin.refreshDiceView();
-                    }));
-        });
-
         new Setting(diceSection)
             .setName('Dice color')
             .setDesc('Base color of the dice (applies as tint with textures)')
@@ -493,57 +405,6 @@ export class DiceSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.diceColor)
                 .onChange(async (value) => {
                     this.plugin.settings.diceColor = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        // Material Properties
-        containerEl.createEl('h4', { text: 'Material Properties', cls: 'dice-settings-subheader' });
-
-        new Setting(diceSection)
-            .setName('Shininess')
-            .setDesc('How shiny/reflective the dice surface appears (0 = matte, 200 = glossy)')
-            .addSlider(slider => slider
-                .setLimits(0, 200, 10)
-                .setValue(this.plugin.settings.diceShininess)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.diceShininess = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(diceSection)
-            .setName('Specular highlight color')
-            .setDesc('Color of the shiny highlights on the dice')
-            .addColorPicker(color => color
-                .setValue(this.plugin.settings.diceSpecular)
-                .onChange(async (value) => {
-                    this.plugin.settings.diceSpecular = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(diceSection)
-            .setName('Enable transparency')
-            .setDesc('Make the dice semi-transparent')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.diceTransparent)
-                .onChange(async (value) => {
-                    this.plugin.settings.diceTransparent = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(diceSection)
-            .setName('Opacity')
-            .setDesc('Transparency level when transparency is enabled (0 = invisible, 1 = opaque)')
-            .addSlider(slider => slider
-                .setLimits(0.1, 1, 0.05)
-                .setValue(this.plugin.settings.diceOpacity)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.diceOpacity = value;
                     await this.plugin.saveSettings();
                     this.plugin.refreshDiceView();
                 }));
@@ -655,160 +516,6 @@ export class DiceSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                     this.plugin.refreshDiceView();
                 }));
-
-        // Custom Textures Section - always shown
-        const textureSection = this.createCollapsibleSection(containerEl, 'Custom Textures', 'textures');
-
-        new Setting(textureSection)
-            .setName('Texture pack')
-            .setDesc('A folder under the plugin\'s dice/ directory holding one sheet per die type. A pack covers every die at once; the uploads below only stand in for what a pack does not supply.')
-            .addDropdown(dropdown => {
-                // display() is synchronous and listing folders is not, so the
-                // pack in use goes in on its own and the rest of the list joins
-                // it a moment later. The control is usable either way.
-                const current = this.plugin.settings.texturePack;
-                dropdown.addOption(current, current || 'None');
-                dropdown.setValue(current);
-                dropdown.onChange(async (value) => {
-                    this.plugin.settings.texturePack = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.applyTexturePack();
-                    this.plugin.refreshDiceView();
-                });
-                this.plugin.listTexturePacks().then((packs) => {
-                    for (const pack of packs) {
-                        if (pack !== current) dropdown.addOption(pack, pack);
-                    }
-                });
-            });
-
-        textureSection.createEl('p', {
-                text: 'Upload custom images for each dice type. Images will use appropriate UV mapping based on the dice geometry.',
-                cls: 'setting-item-description'
-            });
-
-            const diceTypes = [
-                { key: 'd4', name: 'D4', uvType: 'triangles' },
-                { key: 'd6', name: 'D6', uvType: 'squares' },
-                { key: 'd8', name: 'D8', uvType: 'triangles' },
-                { key: 'd10', name: 'D10', uvType: 'custom' },
-                { key: 'd12', name: 'D12', uvType: 'pentagons' },
-                { key: 'd20', name: 'D20', uvType: 'triangles' },
-            ];
-
-            diceTypes.forEach(dice => {
-                const hasTexture = (this.plugin.settings.diceTextures as any)[dice.key] !== '';
-
-                new Setting(textureSection)
-                    .setName(`${dice.name} texture`)
-                    .setDesc(`Custom image for ${dice.name} (uses ${dice.uvType} UV mapping)${hasTexture ? ' ✓' : ''}`)
-                    .addButton(button => button
-                        .setButtonText(hasTexture ? 'Replace Image' : 'Upload Image')
-                        .onClick(() => {
-                            const input = document.createElement('input');
-                            input.type = 'file';
-                            input.accept = 'image/*';
-                            input.addEventListener('change', async (e) => {
-                                const file = (e.target as HTMLInputElement).files?.[0];
-                                if (file) {
-                                    // Check file size (limit to 5MB to prevent memory issues)
-                                    if (file.size > 5 * 1024 * 1024) {
-                                        new Notice('Image file too large. Please use an image smaller than 5MB.');
-                                        return;
-                                    }
-
-                                    const reader = new FileReader();
-                                    reader.onload = async (event) => {
-                                        const base64 = event.target?.result as string;
-                                        (this.plugin.settings.diceTextures as any)[dice.key] = base64;
-                                        await this.plugin.saveTextures();
-                                        this.plugin.refreshDiceView();
-                                        this.display(); // Refresh to update checkmarks
-                                    };
-                                    reader.readAsDataURL(file);
-                                }
-                            });
-                            input.click();
-                        }))
-                    .addButton(button => {
-                        button.setButtonText('Clear')
-                            .setDisabled(!hasTexture)
-                            .onClick(async () => {
-                                (this.plugin.settings.diceTextures as any)[dice.key] = '';
-                                await this.plugin.saveTextures();
-                                this.plugin.refreshDiceView();
-                                this.display(); // Refresh to update checkmarks
-                            });
-
-                        // Only set class if we have a texture (to show warning when disabled)
-                        if (!hasTexture) {
-                            button.setClass('mod-warning');
-                        }
-
-                        return button;
-                    });
-            });
-
-        // Normal Maps Section
-        const normalMapSection = this.createCollapsibleSection(containerEl, 'Normal Maps', 'normal-maps');
-
-        normalMapSection.createEl('p', {
-            text: 'Upload normal maps for surface detail and bumps. Normal maps should be in standard format (RGB channels represent XYZ normal vectors).',
-            cls: 'setting-item-description'
-        });
-
-        diceTypes.forEach(dice => {
-            const hasNormalMap = (this.plugin.settings.diceNormalMaps as any)[dice.key] !== '';
-
-            new Setting(normalMapSection)
-                .setName(`${dice.name} normal map`)
-                .setDesc(`Normal map for ${dice.name} surface detail and bumps${hasNormalMap ? ' ✓' : ''}`)
-                .addButton(button => button
-                    .setButtonText(hasNormalMap ? 'Replace Normal Map' : 'Upload Normal Map')
-                    .onClick(() => {
-                        const input = document.createElement('input');
-                        input.type = 'file';
-                        input.accept = 'image/*';
-                        input.addEventListener('change', async (e) => {
-                            const file = (e.target as HTMLInputElement).files?.[0];
-                            if (file) {
-                                // Check file size (limit to 5MB to prevent memory issues)
-                                if (file.size > 5 * 1024 * 1024) {
-                                    new Notice('Normal map file too large. Please use an image smaller than 5MB.');
-                                    return;
-                                }
-
-                                const reader = new FileReader();
-                                reader.onload = async (event) => {
-                                    const base64 = event.target?.result as string;
-                                    (this.plugin.settings.diceNormalMaps as any)[dice.key] = base64;
-                                    await this.plugin.saveTextures();
-                                    this.plugin.refreshDiceView();
-                                    this.display(); // Refresh to update checkmarks
-                                };
-                                reader.readAsDataURL(file);
-                            }
-                        });
-                        input.click();
-                    }))
-                .addButton(button => {
-                    button.setButtonText('Clear')
-                        .setDisabled(!hasNormalMap)
-                        .onClick(async () => {
-                            (this.plugin.settings.diceNormalMaps as any)[dice.key] = '';
-                            await this.plugin.saveTextures();
-                            this.plugin.refreshDiceView();
-                            this.display(); // Refresh to update checkmarks
-                        });
-
-                    // Only set class if we don't have a normal map (to show warning when disabled)
-                    if (!hasNormalMap) {
-                        button.setClass('mod-warning');
-                    }
-
-                    return button;
-                });
-        });
 
         // Motion Detection Settings Section
         const motionSection = this.createCollapsibleSection(containerEl, 'Motion Detection Settings', 'motion');

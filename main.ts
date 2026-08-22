@@ -1,5 +1,5 @@
 import { Plugin, Notice, WorkspaceLeaf, debounce, normalizePath } from 'obsidian';
-import { D20Dice } from './d20-dice';
+import { D20Dice, DicePack } from './d20-dice';
 import { DiceSettings, DEFAULT_SETTINGS, DiceSettingTab } from './settings';
 import { DiceChatView, CHAT_VIEW_TYPE } from './chat-view';
 
@@ -20,11 +20,6 @@ export default class D20DicePlugin extends Plugin {
     // Everything the overlay registers, so hideDiceOverlay can undo all of it.
     private overlayCleanups: Array<() => void> = [];
     private statusInterval: number | null = null;
-
-    // The face textures are base64 PNGs and dominate the settings blob. They
-    // live in their own file so an ordinary settings change does not rewrite
-    // them; this flag says whether that file is known good.
-    private texturesInSidecar = false;
 
     // Settings changes arrive one per slider tick. Coalesce them.
     private readonly queueSave = debounce(() => { void this.writeSettings(); }, 500, true);
@@ -215,7 +210,7 @@ export default class D20DicePlugin extends Plugin {
 
         // Initialize dice with settings
         this.dice = new D20Dice(diceContainer, this.settings);
-        this.dice.setPackTextures(this.resolvePackTextures());
+        void this.applyTexturePack();
 
         // Create any dice that are already in the settings (from dice requests)
         Object.entries(this.settings.diceCounts).forEach(([diceType, count]) => {
@@ -521,7 +516,7 @@ export default class D20DicePlugin extends Plugin {
      * A missing file is not an error: that type simply falls back to whatever
      * texture the settings hold, or to a plain coloured die.
      */
-    private resolvePackTextures(): Record<string, string> {
+    private resolvePackFiles(key: 'texture' | 'normal'): Record<string, string> {
         const pack = this.settings.texturePack;
         const dir = this.manifest.dir;
         if (!pack || !dir) return {};
@@ -529,10 +524,48 @@ export default class D20DicePlugin extends Plugin {
         const adapter = this.app.vault.adapter;
         const urls: Record<string, string> = {};
         for (const type of D20DicePlugin.PACK_TYPES) {
-            const path = `${dir}/dice/${pack}/${type}_Numbers.png`;
-            urls[type] = adapter.getResourcePath(path);
+            const named = this.packConfig?.dice?.[type]?.[key];
+            // A pack with no manifest still works: the sheets are named after
+            // their die, and there is no normal map unless one is asked for.
+            const file = named || (key === 'texture' ? `${type}_Numbers.png` : null);
+            if (!file) continue;
+            urls[type] = adapter.getResourcePath(`${dir}/dice/${pack}/${file}`);
         }
         return urls;
+    }
+
+    /** The chosen pack's manifest, once read. */
+    private packConfig: DicePack | null = null;
+
+    /**
+     * Read the pack's manifest.
+     *
+     * Everything a set decides about itself lives in this one file - how its
+     * art is laid out, how big each die is, what it is finished like, whether
+     * its edges are taken off. A pack without one still renders; it simply has
+     * no opinions, and the dice fall back to their own proportions and the
+     * geometry's own UVs.
+     */
+    private async loadPackConfig(): Promise<DicePack | null> {
+        const pack = this.settings.texturePack;
+        const dir = this.manifest.dir;
+        if (!pack || !dir) return null;
+        try {
+            const raw = await this.app.vault.adapter.read(`${dir}/dice/${pack}/pack.json`);
+            return JSON.parse(raw) as DicePack;
+        } catch (error) {
+            console.warn(`No usable pack.json in ${pack}:`, error);
+            return null;
+        }
+    }
+
+    /** Load the pack and hand every part of it to the renderer. */
+    async applyTexturePack(): Promise<void> {
+        this.packConfig = await this.loadPackConfig();
+        if (!this.dice) return;
+        this.dice.setPack(this.packConfig || {});
+        this.dice.setPackTextures(this.resolvePackFiles('texture'), this.resolvePackFiles('normal'));
+        this.dice.rebuildDice();
     }
 
     /** Pack folders available to choose from, for the settings dropdown. */
@@ -550,10 +583,6 @@ export default class D20DicePlugin extends Plugin {
         }
     }
 
-    private get texturePath(): string {
-        return normalizePath(`${this.manifest.dir}/textures.json`);
-    }
-
     async loadSettings() {
         const stored = (await this.loadData()) ?? {};
         // Object.assign is shallow, so without cloning the nested objects a
@@ -565,76 +594,29 @@ export default class D20DicePlugin extends Plugin {
         delete stored.diceReceiveShadow;
         delete stored.surfaceReceiveShadow;
 
+        // Dice settings the pack now owns. Dropping them here stops them being
+        // carried straight back out to data.json on the next save.
+        delete stored.diceScales;
+        delete stored.diceTextures;
+        delete stored.diceNormalMaps;
+        delete stored.diceShininess;
+        delete stored.diceSpecular;
+        delete stored.diceTransparent;
+        delete stored.diceOpacity;
+        delete stored.beveledDice;
+
         this.settings = Object.assign({}, DEFAULT_SETTINGS, stored, {
             diceCounts: Object.assign({}, DEFAULT_SETTINGS.diceCounts, stored.diceCounts),
-            diceScales: Object.assign({}, DEFAULT_SETTINGS.diceScales, stored.diceScales),
-            diceTextures: Object.assign({}, DEFAULT_SETTINGS.diceTextures, stored.diceTextures),
-            diceNormalMaps: Object.assign({}, DEFAULT_SETTINGS.diceNormalMaps, stored.diceNormalMaps),
             faceMapping: Object.assign({}, DEFAULT_SETTINGS.faceMapping, stored.faceMapping)
         });
-
-        const sidecar = await this.readTextures();
-        if (sidecar) {
-            this.texturesInSidecar = true;
-            Object.assign(this.settings.diceTextures, sidecar.diceTextures ?? {});
-            Object.assign(this.settings.diceNormalMaps, sidecar.diceNormalMaps ?? {});
-        } else if (this.hasTextureData()) {
-            // First run after the split: move what is already in data.json out.
-            await this.saveTextures();
-        }
-    }
-
-    private hasTextureData(): boolean {
-        const all = [
-            ...Object.values(this.settings.diceTextures ?? {}),
-            ...Object.values(this.settings.diceNormalMaps ?? {})
-        ];
-        return all.some((value) => typeof value === 'string' && value.length > 0);
-    }
-
-    private async readTextures(): Promise<{ diceTextures?: any; diceNormalMaps?: any } | null> {
-        try {
-            if (!(await this.app.vault.adapter.exists(this.texturePath))) return null;
-            return JSON.parse(await this.app.vault.adapter.read(this.texturePath));
-        } catch (error) {
-            console.error('Dice: could not read textures.json, falling back to data.json', error);
-            return null;
-        }
-    }
-
-    /**
-     * Write the face textures to their own file. Only once that has succeeded
-     * are they dropped from data.json, so a failure here costs nothing.
-     */
-    async saveTextures(): Promise<void> {
-        try {
-            await this.app.vault.adapter.write(this.texturePath, JSON.stringify({
-                diceTextures: this.settings.diceTextures,
-                diceNormalMaps: this.settings.diceNormalMaps
-            }));
-            this.texturesInSidecar = await this.app.vault.adapter.exists(this.texturePath);
-        } catch (error) {
-            console.error('Dice: could not write textures.json, keeping textures in data.json', error);
-            this.texturesInSidecar = false;
-        }
-        await this.writeSettings();
     }
 
     private async writeSettings(): Promise<void> {
         if (!this.settings) return;
-        const payload: Record<string, unknown> = Object.assign({}, this.settings) as unknown as Record<string, unknown>;
-        if (this.texturesInSidecar) {
-            delete payload.diceTextures;
-            delete payload.diceNormalMaps;
-        }
-        await this.saveData(payload);
+        await this.saveData(this.settings);
     }
 
-    /**
-     * Settings changes arrive one per slider tick and the payload used to carry
-     * a megabyte of base64, so writes are coalesced. Use saveTextures() when the
-     * texture data itself changed.
-     */
+    /** Settings changes arrive one per slider tick, so writes are coalesced. */
     async saveSettings() {
         this.queueSave();
     }
@@ -655,23 +637,10 @@ export default class D20DicePlugin extends Plugin {
         }
     }, 100, true);
 
-    /** Rebuild the dice, for settings that change their shape rather than their look. */
+    /** Rebuild the dice, for anything that changes their shape rather than their look. */
     rebuildDice(): void {
         if (this.dice) {
             this.dice.rebuildDice();
-        }
-    }
-
-    /**
-     * Point the dice at a different pack.
-     *
-     * refreshDiceView only hands the settings back to the renderer, and the pack
-     * is not among them: it is a set of resolved `app://` URLs built from the
-     * folder name, so changing the folder has to re-resolve and push them.
-     */
-    applyTexturePack(): void {
-        if (this.dice) {
-            this.dice.setPackTextures(this.resolvePackTextures());
         }
     }
 

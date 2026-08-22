@@ -68,9 +68,7 @@ for (let row = 0; row < grid.rows; row++) {
 
 // --- pose every face, wearing the stand-in ----------------------------------
 const savedSize = p.settings.diceSize;
-const savedScales = Object.assign({}, p.settings.diceScales);
 p.settings.diceSize = window.__poseSize || 1.9;
-for (const k of Object.keys(p.settings.diceScales)) p.settings.diceScales[k] = 1;
 
 d.clearAllDice();
 for (let i = 0; i < faces; i++) d.createSingleDice(type);
@@ -141,7 +139,6 @@ d.renderFrame(true);
 for (let i = 0; i < faces; i++) reported.push(d.checkDiceResult(i).result);
 
 p.settings.diceSize = savedSize;
-Object.assign(p.settings.diceScales, savedScales);
 
 const rect = d.renderer.domElement.getBoundingClientRect();
 const screen = d.diceArray.map((m) => {

@@ -27,7 +27,7 @@ const SHADOW_OPACITY = 0.38;
 
 /**
  * Blob radius per die type, as a multiple of that die's `size`
- * (`diceSize` x `diceScales[type]`).
+ * (`diceSize` x the pack's scale for that type).
  *
  * Two different rules, because the types need different things.
  *
@@ -136,41 +136,6 @@ interface AtlasQuad {
 }
 
 /**
- * Which number each geometry face carries, indexed by face.
- *
- * This is a property of the geometry, not of the art: three.js builds a box's
- * sides in the order +X, -X, +Y, -Y, +Z, -Z, and these numbers put opposite
- * faces on opposite sides summing to seven, which is what makes it a die rather
- * than a numbered cube. It changes only if three.js changes.
- *
- * The atlas is looked up *by number*, so this table and the art cannot drift:
- * whatever face is found upright, the number reported is the number printed on
- * it, because the same lookup placed the image there.
- */
-const FACE_NUMBERS: Record<string, number[]> = {
-    d6: [4, 3, 5, 2, 1, 6],
-    // Opposite faces sum to nine, same idea as the cube's seven. Paired against
-    // three.js's own face order (+++ opposite ---, +-+ opposite -+-, and so on)
-    // rather than the equator walk the old result table assumed.
-    d8: [1, 2, 3, 4, 7, 8, 5, 6],
-    // Opposite faces sum to twenty-one. three.js pairs an icosahedron's faces
-    // 0-13, 1-12, 2-11, 3-10, 4-14, 5-17, 6-18, 7-19, 8-15 and 9-16, which is
-    // what this table is built around.
-    d20: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 19, 20, 16, 12, 11, 15, 14, 13],
-    // Opposite faces sum to thirteen. three.js pairs a dodecahedron's faces
-    // 0-8, 1-4, 2-7, 3-9, 5-11 and 6-10.
-    d12: [1, 2, 3, 4, 11, 5, 6, 10, 12, 9, 7, 8],
-    // A d10 is numbered 0-9 and opposite faces sum to nine. three.js is not
-    // building this one - createD10PolyhedronGeometry is - and it pairs the
-    // kites 0-7, 1-8, 2-9, 3-5 and 4-6.
-    d10: [0, 1, 2, 3, 4, 6, 5, 9, 8, 7],
-    // A d4 is read at the corner the resting face leaves out, which is why
-    // the tray looks for this one's downward face. Face k omits corner k+1
-    // by construction, so the table is the identity and stays that way.
-    d4: [1, 2, 3, 4]
-};
-
-/**
  * A face of a net that is not laid out on a grid.
  *
  * A cube unfolds onto squares that tile an image, which is why the d6 gets away
@@ -207,160 +172,52 @@ interface AtlasFace {
 }
 
 /**
- * Where each number is printed, per die type.
+ * A texture pack, as its pack.json describes it.
  *
- * The d6 sheet is a cube cross on a 4x4 grid: 1 on top, 3-2-4 across the
- * middle, then 6, then 5 at the bottom, drawn upside down because that flap
- * folds over.
+ * Everything here used to be tables in this file, which meant a pack could
+ * change what a die looked like but not how its art was laid out, how big it
+ * was, or whether it had its edges taken off. A pack now brings all of that
+ * with it: copy the folder, edit the images, describe them, and it is a
+ * different set of dice.
  *
- * Every rotation here was read off a rendered die, not reasoned about: pose a
- * face upright with harness/scripts/pose.js and look at it at 8x or more. At
- * strip size a rotated digit and an upright one are genuinely hard to tell
- * apart, and guessing from a small image cost a round trip.
+ * `numbers` is the one entry that is not free. It says which number each
+ * geometry face carries, and the face order is three.js's, not the art's - so
+ * it exists here to be kept in step with the cells, not to be chosen. The
+ * values ship paired so opposite faces sum the way a die's should.
  */
-/**
- * Nets that do not fit a grid, in pixels of their own sheet.
- *
- * All of these are read off the art by harness/scripts/net.js rather than
- * fitted, and they are read rather than typed for a reason beyond accuracy: the
- * extractor walks every cell the same way round. The d8's cells were written out
- * by hand at first, alternating handedness without anyone noticing, and a
- * mirrored triangle has exactly the edge lengths of an unmirrored one - so four
- * of its eight faces carried back-to-front digits through every check that
- * measured the shape.
- */
-/** How far into a face the rim eats, as a share of the die's half-size. */
-const BEVEL_DEPTH = 0.1;
+export interface PackDie {
+    /** Face sheet, relative to the pack folder. */
+    texture?: string;
+    /** Normal map, same folder, optional. */
+    normal?: string;
+    /** Size relative to the other dice in the set. */
+    scale?: number;
+    /** A patch of sheet with nothing on it, for a bevel's rim to wear. */
+    rimUV?: [number, number];
+    /** Number per geometry face. See above. */
+    numbers?: number[];
+    /** Cells on a grid, for a net that lies on one - a cube's cross. */
+    grid?: { cols: number; rows: number; cells: AtlasQuad[] };
+    /** Sheet edge in pixels, for cells given as corners. */
+    sheetSize?: number;
+    /** Cells as corners, for a net that lies on no grid. */
+    faces?: AtlasFace[];
+}
 
-/**
- * A patch of each sheet with nothing printed on it, for the rim to wear.
- *
- * Outside a net the art is transparent, and the composite paints the die's own
- * colour there, so a rim pointed at empty sheet comes out plain - which is what
- * a rim should be. These are all well clear of their nets: the d6's cross
- * leaves its last column free, the strip and ring nets all stop short of the
- * right-hand edge, and the d4's triangle leaves its top-left corner open.
- */
-const RIM_UV: Record<string, [number, number]> = {
-    d4: [0.1, 0.9],
-    d6: [0.97, 0.97],
-    d8: [0.85, 0.5],
-    d10: [0.85, 0.5],
-    d12: [0.85, 0.5],
-    d20: [0.85, 0.5],
-    default: [0.97, 0.97]
+export interface DicePack {
+    name?: string;
+    bevel?: { enabled?: boolean; depth?: number };
+    material?: { shininess?: number; specular?: string; transparent?: boolean; opacity?: number };
+    dice?: Record<string, PackDie>;
+}
+
+/** What a die falls back to when its pack says nothing about it. */
+const PACK_FALLBACK: Required<Pick<PackDie, 'scale' | 'rimUV'>> = {
+    scale: 1,
+    rimUV: [0.97, 0.97]
 };
 
-const ATLAS_POLY: Record<string, { size: number; faces: AtlasFace[] }> = {
-    d8: {
-        size: 1024,
-        faces: [
-            { number: 1, corners: [[150, 1], [441, 1], [295, 253]], turn: 0 },
-            { number: 6, corners: [[2, 254], [147, 2], [293, 254]], turn: 0 },
-            { number: 3, corners: [[2, 257], [293, 257], [147, 509]], turn: 0 },
-            { number: 8, corners: [[295, 258], [441, 510], [150, 510]], turn: 0 },
-            { number: 5, corners: [[150, 513], [441, 513], [295, 765]], turn: 0 },
-            { number: 2, corners: [[147, 514], [293, 766], [2, 766]], turn: 0 },
-            { number: 7, corners: [[2, 769], [293, 769], [147, 1021]], turn: 0 },
-            { number: 4, corners: [[295, 770], [441, 1022], [150, 1022]], turn: 0 }
-        ]
-    },
-    // Read off the sheet by harness/scripts/net.js rather than fitted: the
-    // triangles here stand on vertical edges at x = 0, 161, 322 and 483 and
-    // step down by 93 a time, which no reading of the strip as rows of
-    // equilateral triangles predicts.
-    d20: {
-        size: 1024,
-        faces: [
-            { number: 15, corners: [[164, 92], [321, 1], [321, 184]], turn: 0 },
-            { number: 5, corners: [[323, 1], [481, 93], [323, 184]], turn: 0 },
-            { number: 10, corners: [[4, 184], [159, 95], [159, 276]], turn: 0 },
-            { number: 12, corners: [[162, 95], [319, 185], [162, 277]], turn: 0 },
-            { number: 2, corners: [[163, 279], [321, 188], [321, 370]], turn: 0 },
-            { number: 18, corners: [[323, 188], [481, 279], [323, 370]], turn: 0 },
-            { number: 8, corners: [[159, 281], [159, 463], [3, 373]], turn: 0 },
-            { number: 20, corners: [[162, 281], [320, 372], [162, 463]], turn: 0 },
-            { number: 14, corners: [[163, 465], [321, 374], [321, 556]], turn: 0 },
-            { number: 4, corners: [[323, 374], [480, 466], [323, 556]], turn: 0 },
-            { number: 16, corners: [[159, 467], [159, 649], [3, 559]], turn: 0 },
-            { number: 6, corners: [[162, 467], [320, 558], [162, 649]], turn: 0 },
-            { number: 9, corners: [[163, 651], [321, 560], [321, 742]], turn: 0 },
-            { number: 11, corners: [[323, 560], [481, 651], [323, 742]], turn: 0 },
-            { number: 3, corners: [[2, 744], [159, 653], [159, 835]], turn: 0 },
-            { number: 19, corners: [[162, 653], [320, 744], [162, 835]], turn: 0 },
-            { number: 1, corners: [[163, 837], [321, 746], [321, 928]], turn: 0 },
-            { number: 13, corners: [[323, 746], [481, 837], [323, 928]], turn: 0 },
-            { number: 17, corners: [[2, 930], [159, 840], [159, 1021]], turn: 0 },
-            { number: 7, corners: [[162, 839], [318, 929], [162, 1021]], turn: 0 }
-        ]
-    },
-    // Two rings of five pentagons around a centre each, which is how a
-    // dodecahedron unfolds. Same extractor as the d20, asked for five
-    // corners instead of three.
-    d12: {
-        size: 1024,
-        faces: [
-            { number: 3, corners: [[120, 101], [194, 1], [311, 39], [311, 163], [194, 201]], turn: 0 },
-            { number: 2, corners: [[314, 162], [386, 64], [504, 102], [504, 225], [387, 264]], turn: 0 },
-            { number: 5, corners: [[74, 165], [191, 203], [191, 327], [73, 365], [1, 266]], turn: 0 },
-            { number: 1, corners: [[194, 203], [311, 165], [384, 266], [310, 365], [194, 327]], turn: 0 },
-            { number: 4, corners: [[313, 367], [386, 267], [504, 305], [504, 428], [386, 467]], turn: 0 },
-            { number: 6, corners: [[193, 329], [311, 368], [311, 491], [195, 529], [121, 431]], turn: 0 },
-            { number: 10, corners: [[194, 532], [309, 494], [384, 593], [312, 693], [194, 655]], turn: 0 },
-            { number: 11, corners: [[1, 594], [118, 556], [191, 657], [119, 756], [1, 718]], turn: 0 },
-            { number: 12, corners: [[122, 755], [195, 658], [311, 696], [311, 819], [192, 857]], turn: 0 },
-            { number: 8, corners: [[313, 696], [429, 658], [503, 759], [431, 858], [313, 820]], turn: 0 },
-            { number: 9, corners: [[1, 797], [118, 759], [189, 863], [119, 959], [1, 921]], turn: 0 },
-            { number: 7, corners: [[194, 860], [312, 822], [384, 921], [312, 1022], [194, 984]], turn: 0 }
-        ]
-    },
-    // Ten kites in a zigzag strip. Not regular polygons, but a kite is
-    // convex, so sorting its corners by angle about the centre still walks
-    // them the way round they go.
-    d10: {
-        size: 1024,
-        faces: [
-            { number: 0, corners: [[257, 1], [463, 92], [257, 184], [211, 93]], turn: 0 },
-            { number: 7, corners: [[209, 94], [255, 187], [209, 277], [7, 188]], turn: 0 },
-            { number: 4, corners: [[257, 188], [464, 279], [257, 370], [211, 279]], turn: 0 },
-            { number: 1, corners: [[2, 372], [209, 280], [255, 371], [210, 462]], turn: 0 },
-            { number: 6, corners: [[257, 374], [464, 465], [257, 556], [211, 465]], turn: 0 },
-            { number: 9, corners: [[2, 558], [210, 468], [255, 559], [207, 649]], turn: 0 },
-            { number: 2, corners: [[257, 560], [464, 651], [257, 742], [211, 652]], turn: 0 },
-            { number: 5, corners: [[203, 655], [255, 745], [209, 836], [8, 747]], turn: 0 },
-            { number: 8, corners: [[257, 746], [463, 838], [260, 928], [211, 838]], turn: 0 },
-            { number: 3, corners: [[208, 839], [255, 931], [209, 1022], [3, 931]], turn: 0 }
-        ]
-    },
-    // A tetrahedron unfolds to one big triangle cut into four. Corner numbers
-    // are read off the sheet: 1 at the three outer corners, and 3, 2 and 4 at
-    // the midpoints, each repeated on all the cells that meet there - which is
-    // the whole point of a corner-read die.
-    d4: {
-        size: 1024,
-        faces: [
-            { number: 1, corners: [[444, 258], [880, 514], [444, 765]], turn: 0, vertices: [3, 2, 4] },
-            { number: 2, corners: [[441, 258], [441, 765], [4, 513]], turn: 0, vertices: [3, 4, 1] },
-            { number: 3, corners: [[885, 514], [885, 1021], [446, 768]], turn: 0, vertices: [2, 1, 4] },
-            { number: 4, corners: [[446, 255], [885, 2], [885, 509]], turn: 0, vertices: [3, 1, 2] }
-        ]
-    }
-};
-
-const ATLAS_GRID: Record<string, { cols: number; rows: number; cells: AtlasQuad[] }> = {
-    d6: {
-        cols: 4,
-        rows: 4,
-        cells: [
-            { number: 1, col: 1, row: 0, rotation: 3 },
-            { number: 3, col: 0, row: 1, rotation: 3 },
-            { number: 2, col: 1, row: 1, rotation: 3 },
-            { number: 4, col: 2, row: 1, rotation: 3 },
-            { number: 6, col: 1, row: 2, rotation: 3 },
-            { number: 5, col: 1, row: 3, rotation: 1 }
-        ]
-    }
-};
+const BEVEL_FALLBACK = { enabled: true, depth: 0.1 };
 
 
 export class D20Dice {
@@ -432,6 +289,34 @@ export class D20Dice {
     // meshes that reference them, so a cache outliving the renderer would hand
     // out disposed handles to the next overlay.
     private readonly textureCache = new Map<string, THREE.Texture>();
+    /**
+     * The chosen pack, as read from its pack.json.
+     *
+     * Empty until one loads, and empty is a working state: a die with nothing
+     * said about it keeps its own proportions, wears whatever texture the pack
+     * folder gave it, and falls back to the geometry's own UVs rather than an
+     * atlas. That is what a pack with no manifest looks like.
+     */
+    private pack: DicePack = {};
+
+    public setPack(pack: DicePack): void {
+        this.pack = pack || {};
+        this.wake();
+    }
+
+    private packDie(diceType: string): PackDie {
+        return this.pack.dice?.[diceType] || {};
+    }
+
+    /** Which number each geometry face carries, or nothing if the pack is silent. */
+    private numbersFor(diceType: string): number[] | null {
+        const numbers = this.packDie(diceType).numbers;
+        return numbers && numbers.length ? numbers : null;
+    }
+
+    private scaleFor(diceType: string): number {
+        return this.packDie(diceType).scale ?? PACK_FALLBACK.scale;
+    }
     // cannon only consults a Material through a ContactMaterial pair; with none
     // registered every body falls back to world.defaultContactMaterial anyway,
     // so one shared instance behaves identically to one per body.
@@ -766,7 +651,7 @@ export class D20Dice {
             if (!die) continue;
 
             const type = this.diceTypeArray[i] || 'd20';
-            const scale = (this.settings.diceScales as Record<string, number>)[type] || 1;
+            const scale = this.scaleFor(type);
             const size = this.settings.diceSize * scale;
             const radius = (BLOB_RADIUS[type] ?? BLOB_RADIUS.d20) * size;
             const restHeight = (BLOB_REST_HEIGHT[type] ?? BLOB_REST_HEIGHT.d20) * size;
@@ -846,10 +731,7 @@ export class D20Dice {
         // Create a basic fallback material with all configured properties
         const fallbackMaterialProps: any = {
             color: this.settings.diceColor,
-            shininess: this.settings.diceShininess,
-            specular: this.settings.diceSpecular,
-            transparent: this.settings.diceTransparent,
-            opacity: this.settings.diceOpacity
+            ...this.packFinish()
         };
 
         // Add normal map to fallback material if available
@@ -1801,7 +1683,7 @@ export class D20Dice {
 
     private createGeometryForDiceType(diceType: string): THREE.BufferGeometry {
         const baseSize = this.settings.diceSize;
-        const scale = this.settings.diceScales[diceType as keyof typeof this.settings.diceScales] || 1.0;
+        const scale = this.scaleFor(diceType);
         const size = baseSize * scale;
 
         let geometry: THREE.BufferGeometry;
@@ -1827,12 +1709,13 @@ export class D20Dice {
                 break;
         }
 
-        if (!this.settings.beveledDice) return geometry;
+        const bevel = this.pack.bevel || BEVEL_FALLBACK;
+        if (bevel.enabled === false) return geometry;
         return this.chamferGeometry(
             geometry,
             this.getFaceCountForDiceType(diceType),
-            size * BEVEL_DEPTH,
-            RIM_UV[diceType] || RIM_UV.default
+            size * (bevel.depth ?? BEVEL_FALLBACK.depth),
+            this.packDie(diceType).rimUV || PACK_FALLBACK.rimUV
         );
     }
 
@@ -1846,8 +1729,8 @@ export class D20Dice {
      * the same way and wound the same way.
      */
     private applyQuadAtlasUV(geometry: THREE.BufferGeometry, diceType: string): boolean {
-        const atlas = ATLAS_GRID[diceType];
-        const numbers = FACE_NUMBERS[diceType];
+        const atlas = this.packDie(diceType).grid;
+        const numbers = this.numbersFor(diceType);
         if (!atlas || !numbers) return false;
 
         const uv = geometry.attributes.uv;
@@ -1897,8 +1780,9 @@ export class D20Dice {
      * it goes round.
      */
     private applyPolyAtlasUV(geometry: THREE.BufferGeometry, diceType: string): boolean {
-        const atlas = ATLAS_POLY[diceType];
-        const numbers = FACE_NUMBERS[diceType];
+        const die = this.packDie(diceType);
+        const atlas = die.faces && die.sheetSize ? { size: die.sheetSize, faces: die.faces } : null;
+        const numbers = this.numbersFor(diceType);
         if (!atlas || !numbers) return false;
 
         const uv = geometry.attributes.uv;
@@ -2126,13 +2010,21 @@ export class D20Dice {
         }
     }
 
+    /** How the set is finished. Colour is the roller's; the rest is the pack's. */
+    private packFinish(): { shininess: number; specular: string; transparent: boolean; opacity: number } {
+        const finish = this.pack.material || {};
+        return {
+            shininess: finish.shininess ?? 100,
+            specular: finish.specular ?? '#222222',
+            transparent: finish.transparent ?? false,
+            opacity: finish.opacity ?? 1
+        };
+    }
+
     private createMaterialForDiceType(diceType: string): THREE.MeshPhongMaterial {
         const materialProps: any = {
             color: this.settings.diceColor,
-            shininess: this.settings.diceShininess,
-            specular: this.settings.diceSpecular,
-            transparent: this.settings.diceTransparent,
-            opacity: this.settings.diceOpacity
+            ...this.packFinish()
         };
 
         // Apply dice texture if available
@@ -2169,21 +2061,21 @@ export class D20Dice {
      * data.json.
      */
     private getDiceTextureDataForType(diceType: string): string | null {
-        return this.packTextures[diceType]
-            || this.settings.diceTextures[diceType as keyof typeof this.settings.diceTextures]
-            || null;
+        return this.packTextures[diceType] || null;
     }
 
     /** Resource URLs for the selected pack, keyed by die type. */
     private packTextures: Record<string, string> = {};
+    private packNormals: Record<string, string> = {};
 
-    public setPackTextures(textures: Record<string, string>): void {
+    public setPackTextures(textures: Record<string, string>, normals: Record<string, string> = {}): void {
         this.packTextures = textures;
+        this.packNormals = normals;
         this.wake();
     }
 
     private getDiceNormalMapDataForType(diceType: string): string | null {
-        return this.settings.diceNormalMaps[diceType as keyof typeof this.settings.diceNormalMaps] || null;
+        return this.packNormals[diceType] || null;
     }
 
     /**
@@ -2293,7 +2185,7 @@ export class D20Dice {
 
     private createPhysicsBodyForDiceType(diceType: string): CANNON.Body {
         const baseSize = this.settings.diceSize;
-        const scale = this.settings.diceScales[diceType as keyof typeof this.settings.diceScales] || 1.0;
+        const scale = this.scaleFor(diceType);
         const size = baseSize * scale;
 
         // Create proper physics shape based on dice type
@@ -2371,7 +2263,7 @@ export class D20Dice {
         // from 2 units made the shadow slide 32 px out from under a die that
         // appeared perfectly still, which reads as a second object moving on its
         // own rather than as a die falling.
-        const scale = (this.settings.diceScales as any)[diceType] || 1.0;
+        const scale = this.scaleFor(diceType);
         const restingHeight = this.settings.diceSize * scale;
 
         return new THREE.Vector3(
@@ -2713,7 +2605,8 @@ export class D20Dice {
         const pos = geometry.attributes.position;
         // A dodecahedron's face is nine vertices, not three, so the stride has
         // to come from how many faces the atlas says there are.
-        const atlas = ATLAS_POLY[diceType];
+        const die = this.packDie(diceType);
+        const atlas = die.faces ? { faces: die.faces } : null;
         const perFace = (geometry.userData.faceVertexCount as number)
             || (atlas ? pos.count / atlas.faces.length : 3);
         const normals: THREE.Vector3[] = [];
@@ -2738,7 +2631,7 @@ export class D20Dice {
     }
 
     private computeFaceNormalsForDiceType(diceType: string): THREE.Vector3[] {
-        if (ATLAS_POLY[diceType]) return this.deriveFaceNormalsFromGeometry(diceType);
+        if (this.packDie(diceType).faces) return this.deriveFaceNormalsFromGeometry(diceType);
 
         switch (diceType) {
             case 'd4':
@@ -2882,42 +2775,21 @@ export class D20Dice {
         }
     }
 
+    /**
+     * The number on a face, from the same table that placed the art.
+     *
+     * Looked up rather than computed, so the two cannot drift: whatever face
+     * comes up, the number reported is the one printed on it. A pack that says
+     * nothing falls back to counting from one - except the d10, which counts
+     * from zero, and really does have a face reading zero.
+     */
     private mapFaceIndexToNumber(faceIndex: number, diceType: string): number {
-        // For most dice, face index directly maps to face number
-        // Special cases can be handled here
-        switch (diceType) {
-            case 'd4':
-                // The same table that placed the art. See FACE_NUMBERS.
-                return FACE_NUMBERS.d4[faceIndex] || 1;
-
-            case 'd6':
-                // The same table that placed the art. See FACE_NUMBERS.
-                return FACE_NUMBERS.d6[faceIndex] || 1;
-
-            case 'd8':
-                // The same table that placed the art. See FACE_NUMBERS.
-                return FACE_NUMBERS.d8[faceIndex] || 1;
-
-            case 'd10': {
-                // The same table that placed the art. See FACE_NUMBERS. Written
-                // out rather than defaulted with `||`, because a d10 really does
-                // have a face reading zero and `||` would call it a one.
-                const d10 = FACE_NUMBERS.d10[faceIndex];
-                return d10 === undefined ? 0 : d10;
-            }
-
-            case 'd12':
-                // The same table that placed the art. See FACE_NUMBERS.
-                return FACE_NUMBERS.d12[faceIndex] || 1;
-
-            case 'd20':
-                // The same table that placed the art. See FACE_NUMBERS.
-                return FACE_NUMBERS.d20[faceIndex] || 1;
-
-            default:
-                // Default: face index + 1 gives face number
-                return faceIndex + 1;
+        const numbers = this.numbersFor(diceType);
+        if (numbers) {
+            const number = numbers[faceIndex];
+            if (number !== undefined) return number;
         }
+        return diceType === 'd10' ? faceIndex : faceIndex + 1;
     }
 
     private formatRollResults(results: { [key: string]: number[] }, totalSum: number): string {
@@ -3224,10 +3096,7 @@ export class D20Dice {
             // Textured dice carry their colour in the composite instead; see
             // loadTextureFromData.
             color: customTexture ? 0xffffff : this.settings.diceColor,
-            shininess: this.settings.diceShininess,
-            specular: this.settings.diceSpecular,
-            transparent: this.settings.diceTransparent,
-            opacity: this.settings.diceOpacity
+            ...this.packFinish()
         };
 
         // Add texture if available
@@ -3355,15 +3224,7 @@ export class D20Dice {
     }
 
     private getCurrentDiceTextureData(): string | null {
-        const textureMap = this.settings.diceTextures as Record<string, string> | undefined;
-        if (textureMap) {
-            const perType = textureMap[this.settings.diceType];
-            if (perType && perType.trim() !== '') {
-                return perType;
-            }
-        }
-
-        return null;
+        return this.packTextures[this.settings.diceType] || null;
     }
 
     private getFaceCount(): number {
@@ -3388,15 +3249,7 @@ export class D20Dice {
     }
 
     private getCurrentDiceNormalMapData(): string | null {
-        // Check for per-dice-type normal map
-        const diceType = this.settings.diceType;
-        const normalMapData = this.settings.diceNormalMaps[diceType];
-
-        if (normalMapData && normalMapData.trim() !== '') {
-            return normalMapData;
-        }
-
-        return null;
+        return this.packNormals[this.settings.diceType] || null;
     }
 
     private loadNormalMap(normalMapData?: string): THREE.Texture | null {
@@ -3571,7 +3424,7 @@ export class D20Dice {
             const sy = (-this.pickVec.y * 0.5 + 0.5) * rect.height;
 
             const type = this.diceTypeArray[i] || 'd20';
-            const scale = (this.settings.diceScales as any)[type] || 1.0;
+            const scale = this.scaleFor(type);
             // 1.25 gives a little forgiveness around the silhouette.
             const radius = this.settings.diceSize * scale * 1.25 * pxPerUnit;
 
@@ -3881,7 +3734,7 @@ export class D20Dice {
     private draggedRadius(): number {
         const sizeOf = (i: number) => {
             const type = this.diceTypeArray[i] || 'd20';
-            const scale = (this.settings.diceScales as Record<string, number>)[type] || 1;
+            const scale = this.scaleFor(type);
             return this.settings.diceSize * scale;
         };
 
@@ -4717,10 +4570,11 @@ export class D20Dice {
         if (this.dice && this.dice.material) {
             const material = this.dice.material as THREE.MeshPhongMaterial;
             material.color.setStyle(this.settings.diceColor);
-            material.shininess = this.settings.diceShininess;
-            material.specular = new THREE.Color(this.settings.diceSpecular);
-            material.transparent = this.settings.diceTransparent;
-            material.opacity = this.settings.diceOpacity;
+            const finish = this.packFinish();
+            material.shininess = finish.shininess;
+            material.specular = new THREE.Color(finish.specular);
+            material.transparent = finish.transparent;
+            material.opacity = finish.opacity;
             material.needsUpdate = true;
         }
 

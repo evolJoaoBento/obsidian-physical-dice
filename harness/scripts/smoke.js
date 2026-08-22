@@ -275,8 +275,9 @@ try {
     };
     const halfW = (dice.camera.right - dice.camera.left) / 2;
     const halfL = (dice.camera.top - dice.camera.bottom) / 2;
+    // Per-die size belongs to the pack now, not the settings.
     const dieSize = plugin.settings.diceSize *
-        (plugin.settings.diceScales[dice.diceTypeArray[0]] || 1);
+        (dice.pack?.dice?.[dice.diceTypeArray[0]]?.scale ?? 1);
     const corner = reach(1, -1);
     record('a held die reaches the tray wall',
         halfW - Math.abs(corner.x) <= dieSize * 1.5 &&
