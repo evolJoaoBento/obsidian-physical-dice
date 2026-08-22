@@ -2123,7 +2123,11 @@ export class D20Dice {
         // Apply dice texture if available
         const textureData = this.getDiceTextureDataForType(diceType);
         if (textureData) {
-            const texture = this.loadTextureFromData(textureData, this.colorFor(diceType));
+            const texture = this.loadTextureFromData(
+                textureData,
+                this.colorFor(diceType),
+                this.packDie(diceType).rimUV || PACK_FALLBACK.rimUV
+            );
             if (texture) {
                 materialProps.map = texture;
                 // The die colour is already painted into the texture. Leaving it
@@ -2172,6 +2176,77 @@ export class D20Dice {
     }
 
     /**
+     * Give the bevel's rim the same wash the faces wear.
+     *
+     * A sheet paints two things over the die's colour: a faint wash across every
+     * face, and the digits. The rim samples blank sheet, where there is no wash
+     * - so it came out the die's colour undarkened while every face came out
+     * about a sixth darker, and the bevel read as a brighter stripe round a
+     * duller die rather than as part of it.
+     *
+     * The wash is measured off the sheet rather than declared: it is the
+     * commonest colour-and-alpha the sheet paints, once the digits are set aside
+     * as the opaque end. Laying that over the rim's corner of the canvas exactly
+     * as a cell lays it over a face leaves the two the same colour, whatever the
+     * pack is and whatever colour it is.
+     *
+     * Measured from the sheet and not from the finished composite: by then the
+     * wash has already been blended into the die's colour, and telling a washed
+     * red apart from a plain one means knowing which is which beforehand.
+     */
+    private paintRimPatch(
+        ctx: CanvasRenderingContext2D,
+        canvas: HTMLCanvasElement,
+        img: HTMLImageElement,
+        color: string,
+        rimUV?: [number, number]
+    ): void {
+        if (!rimUV) return;
+
+        const scratch = document.createElement('canvas');
+        scratch.width = img.width;
+        scratch.height = img.height;
+        const sheet = scratch.getContext('2d', { willReadFrequently: true });
+        if (!sheet) return;
+        sheet.drawImage(img, 0, 0);
+
+        let pixels: Uint8ClampedArray;
+        try {
+            pixels = sheet.getImageData(0, 0, img.width, img.height).data;
+        } catch {
+            // A sheet from somewhere that taints the canvas. The rim keeps the
+            // plain colour, which is the old behaviour rather than a failure.
+            return;
+        }
+
+        // Commonest painted colour, digits set aside. Every 37th pixel is ample
+        // for something this flat and keeps it off the critical path.
+        const seen = new Map<number, number>();
+        for (let i = 0; i < pixels.length; i += 4 * 37) {
+            const alpha = pixels[i + 3];
+            if (alpha <= 8 || alpha > 240) continue;
+            const packed = (pixels[i] << 24) | (pixels[i + 1] << 16) | (pixels[i + 2] << 8) | alpha;
+            seen.set(packed, (seen.get(packed) || 0) + 1);
+        }
+
+        let wash = 0, most = 0;
+        for (const [packed, count] of seen) {
+            if (count > most) { most = count; wash = packed; }
+        }
+        if (!most) return;
+
+        // A patch rather than a pixel: mipmaps average neighbours, and a lone
+        // texel would be blended away at the sizes a die is actually drawn.
+        const size = Math.max(8, Math.round(Math.min(canvas.width, canvas.height) / 32));
+        const x = Math.round(rimUV[0] * canvas.width) - size / 2;
+        const y = Math.round((1 - rimUV[1]) * canvas.height) - size / 2;
+        ctx.fillStyle = color;
+        ctx.fillRect(x, y, size, size);
+        ctx.fillStyle = `rgba(${(wash >>> 24) & 255}, ${(wash >> 16) & 255}, ${(wash >> 8) & 255}, ${(wash & 255) / 255})`;
+        ctx.fillRect(x, y, size, size);
+    }
+
+    /**
      * Face art is a *mask*, not a picture, and has to be composited rather than
      * tinted.
      *
@@ -2188,8 +2263,12 @@ export class D20Dice {
      * whatever colour the die is. The material then has to be left white or the
      * old multiply comes straight back.
      */
-    private loadTextureFromData(textureData: string, color: string): THREE.Texture | null {
-        const key = `${textureData}|${color}`;
+    private loadTextureFromData(
+        textureData: string,
+        color: string,
+        rimUV?: [number, number]
+    ): THREE.Texture | null {
+        const key = `${textureData}|${color}|${rimUV ? rimUV.join(',') : ''}`;
         const cached = this.textureCache.get(key);
         if (cached) return cached;
 
@@ -2218,6 +2297,7 @@ export class D20Dice {
             ctx.fillStyle = color;
             ctx.fillRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(img, 0, 0);
+            this.paintRimPatch(ctx, canvas, img, color, rimUV);
             // The placeholder above is 1x1, and the GPU allocation three made
             // for it does not grow: mark the texture dirty on its own and the
             // repaint is uploaded into a one-pixel target, so every face samples
@@ -3339,7 +3419,11 @@ export class D20Dice {
      */
     private loadCustomTexture(textureData?: string): THREE.Texture | null {
         if (!textureData) return null;
-        return this.loadTextureFromData(textureData, this.colorFor(this.settings.diceType));
+        return this.loadTextureFromData(
+            textureData,
+            this.colorFor(this.settings.diceType),
+            this.packDie(this.settings.diceType).rimUV || PACK_FALLBACK.rimUV
+        );
     }
 
     private getCurrentDiceNormalMapData(): string | null {

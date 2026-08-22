@@ -141,10 +141,16 @@ normals would only shade its digit unevenly.
 
 ### rimUV
 
-A point on the sheet with nothing printed on it. Bevelled edges wear it, and
-because it is transparent there they come out in the die's own colour. Pick
+A point on the sheet with nothing printed on it. Bevelled edges wear it. Pick
 somewhere clear of the net - the last column, or a corner the net does not
 reach.
+
+Blank sheet has no wash on it, so left alone a rim would come out the die's
+colour undarkened while every face came out a sixth darker, and the bevel would
+read as a bright stripe round a duller die. The plugin measures the wash off the
+sheet - the commonest colour-and-alpha it paints, digits aside - and lays it
+over this corner of the texture exactly as a cell lays it over a face, so the
+two match without a pack having to arrange it.
 
 ## Working them out
 
