@@ -931,10 +931,25 @@ export class D20Dice {
             );
         }
 
-        // Define faces (triangles) - based on react-3d-dice
+        /*
+         * Twenty triangles, two to a face: a d10's faces are kites, and each is
+         * a pair of these sharing the edge from the apex to the corner the kite
+         * is built around.
+         *
+         * The order matters, because everything downstream reads a face as two
+         * triangles running together in the buffer. A kite is only a kite if the
+         * corner in the middle of its three equatorial ones sits on the far side
+         * of the equator from its apex - the near corner and the two shoulders
+         * have to fall on opposite sides, or the four are not even coplanar. The
+         * top fan used to start one triangle early, which built its five faces
+         * around the corners nearest the apex instead of the ones furthest from
+         * it. They came out a different shape from the bottom five, and the art
+         * laid on them was stretched to match. Starting at [0, 11, 2] fixes it;
+         * the bottom fan was already right.
+         */
         const faces = [
-            [0, 2, 3], [0, 3, 4], [0, 4, 5], [0, 5, 6], [0, 6, 7],
-            [0, 7, 8], [0, 8, 9], [0, 9, 10], [0, 10, 11], [0, 11, 2],
+            [0, 11, 2], [0, 2, 3], [0, 3, 4], [0, 4, 5], [0, 5, 6],
+            [0, 6, 7], [0, 7, 8], [0, 8, 9], [0, 9, 10], [0, 10, 11],
             [1, 3, 2], [1, 4, 3], [1, 5, 4], [1, 6, 5], [1, 7, 6],
             [1, 8, 7], [1, 9, 8], [1, 10, 9], [1, 11, 10], [1, 2, 11]
         ];
