@@ -521,6 +521,31 @@ export class ButtonComponent extends BaseComponent {
     }
 }
 
+/** An icon button beside a setting's controls. */
+export class ExtraButtonComponent extends BaseComponent {
+    extraSettingsEl: HTMLElement;
+
+    constructor(containerEl: HTMLElement) {
+        super();
+        this.extraSettingsEl = document.createElement('button');
+        this.extraSettingsEl.classList.add('clickable-icon', 'extra-setting-button');
+        containerEl.appendChild(this.extraSettingsEl);
+    }
+
+    setIcon(icon: string): this {
+        setIcon(this.extraSettingsEl, icon);
+        return this;
+    }
+    setTooltip(tooltip: string): this {
+        this.extraSettingsEl.setAttribute('aria-label', tooltip);
+        return this;
+    }
+    onClick(handler: () => any): this {
+        this.extraSettingsEl.addEventListener('click', () => handler());
+        return this;
+    }
+}
+
 export class DropdownComponent extends BaseComponent {
     selectEl: HTMLSelectElement;
     private handler: ((value: string) => any) | null = null;
@@ -627,6 +652,10 @@ export class Setting {
     }
     addButton(cb: (component: ButtonComponent) => any): this {
         cb(new ButtonComponent(this.controlEl));
+        return this;
+    }
+    addExtraButton(cb: (component: ExtraButtonComponent) => any): this {
+        cb(new ExtraButtonComponent(this.controlEl));
         return this;
     }
     addDropdown(cb: (component: DropdownComponent) => any): this {
