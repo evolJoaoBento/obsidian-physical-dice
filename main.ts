@@ -1,7 +1,8 @@
-import { Plugin, Notice, WorkspaceLeaf, debounce, normalizePath } from 'obsidian';
+import { Plugin, Notice, debounce, setIcon } from 'obsidian';
 import { D20Dice, DicePack } from './d20-dice';
 import { DiceSettings, DEFAULT_SETTINGS, DiceSettingTab } from './settings';
-import { DiceChatView, CHAT_VIEW_TYPE } from './chat-view';
+import { sendRollToAtlas } from './atlas-bridge';
+import { appendDiceIcon } from './dice-icons';
 
 export default class D20DicePlugin extends Plugin {
     settings: DiceSettings;
@@ -13,9 +14,6 @@ export default class D20DicePlugin extends Plugin {
     private controlsDragOffset = { x: 0, y: 0 };
     private updateRollButtonTextCallback: ((diceType: string) => void) | null = null;
     private updateDiceCountDisplayCallback: (() => void) | null = null;
-
-    // API Integration
-    private chatRibbonIcon: HTMLElement | null = null;
 
     // Everything the overlay registers, so hideDiceOverlay can undo all of it.
     private overlayCleanups: Array<() => void> = [];
@@ -38,16 +36,6 @@ export default class D20DicePlugin extends Plugin {
         this.addRibbonIcon('dice', 'Toggle D20 Dice Roller', (evt: MouseEvent) => {
             this.toggleDiceOverlay();
         });
-
-        // Register chat view
-        this.registerView(
-            CHAT_VIEW_TYPE,
-            (leaf) => new DiceChatView(leaf, this)
-        );
-
-        // Initialize API integration. Detaching leaves during onload would undo
-        // the workspace's own restore, so only the ribbon icon is set up here.
-        this.refreshApiIntegration(false);
 
         this.addSettingTab(new DiceSettingTab(this.app, this));
     }
@@ -76,18 +64,25 @@ export default class D20DicePlugin extends Plugin {
         // Create dice container
         const diceContainer = this.diceOverlay.createDiv('dice-floating-container');
 
-        // Create draggable controls panel
+        // Create draggable controls panel. Laid out like Atlas VTT's dice panel:
+        // a header, one row of dice, and a bar with the formula and the actions.
         this.controlsPanel = this.diceOverlay.createDiv('dice-controls-panel');
 
-        // Add drag handle at the top
-        const dragHandle = this.controlsPanel.createDiv('dice-controls-drag-handle');
-        dragHandle.setText('⋮⋮⋮');
+        // Header: drag grip and title on the left, close button in the corner.
+        const header = this.controlsPanel.createDiv('dice-controls-header');
+        const dragHandle = header.createDiv('dice-controls-drag-handle');
+        setIcon(dragHandle.createSpan('dice-controls-grip'), 'grip-vertical');
+        dragHandle.createSpan({ cls: 'dice-controls-title', text: 'Physical Dice' });
 
-        // Roll button
-        const rollButton = this.controlsPanel.createEl('button', {
-            text: 'Roll All Dice',
-            cls: 'mod-cta dice-roll-button'
+        const closeBtn = header.createEl('button', {
+            cls: 'dice-floating-close-btn',
+            attr: { 'aria-label': 'Close dice roller' }
         });
+        setIcon(closeBtn, 'x');
+        closeBtn.addEventListener('click', () => this.hideDiceOverlay());
+
+        // Dice row: one button per type, adding a die; the badge counts them.
+        const diceButtonsContainer = this.controlsPanel.createDiv('dice-type-grid');
 
         // Result display
         const resultElement = this.controlsPanel.createDiv({ cls: 'dice-result-overlay' });
@@ -103,76 +98,100 @@ export default class D20DicePlugin extends Plugin {
         rerollButton.hide();
         rerollButton.disabled = true;
 
+        // Formula bar: what is on the table, then clear and roll.
+        const formulaBar = this.controlsPanel.createDiv('dice-formula-bar');
+        const diceCountDisplay = formulaBar.createDiv({ cls: 'dice-count-display' });
+        const actions = formulaBar.createDiv('dice-formula-actions');
+
+        const clearButton = actions.createEl('button', {
+            cls: 'dice-clear-button',
+            attr: { 'aria-label': 'Clear all dice' }
+        });
+        setIcon(clearButton, 'trash-2');
+
+        const rollButton = actions.createEl('button', {
+            text: 'Roll',
+            cls: 'mod-cta dice-roll-button'
+        });
+
         // Update roll button text based on dice type
         const updateRollButtonText = (diceType: string) => {
-            rollButton.textContent = `Roll All Dice`;
+            rollButton.textContent = 'Roll';
         };
         updateRollButtonText('d20');
 
-        // Dice Management Section
-        const diceManagementSection = this.controlsPanel.createDiv('dice-section');
-
-        const diceCountDisplay = diceManagementSection.createEl('div', { cls: 'dice-count-display' });
+        // Atlas VTT's order, percentile last.
+        const diceTypes = ['d4', 'd6', 'd8', 'd10', 'd12', 'd20', 'd100'];
+        const badges = new Map<string, HTMLElement>();
+        const typeButtons = new Map<string, HTMLElement>();
 
         const updateDiceCountDisplay = () => {
-            const totalDice = Object.values(this.settings.diceCounts).reduce((sum, count) => sum + count, 0);
-            const countText = Object.entries(this.settings.diceCounts)
+            const counts = this.settings.diceCounts as Record<string, number>;
+            const totalDice = Object.values(counts).reduce((sum, count) => sum + count, 0);
+            const countText = Object.entries(counts)
                 .filter(([_, count]) => count > 0)
                 .map(([type, count]) => `${count}${type}`)
                 .join(' + ') || 'No dice';
-            diceCountDisplay.textContent = `Total: ${totalDice}/50 dice (${countText})`;
+            diceCountDisplay.textContent = `${countText} · ${totalDice}/50`;
+            for (const [type, badge] of badges) {
+                const count = counts[type] ?? 0;
+                badge.textContent = String(count);
+                badge.toggleClass('is-empty', count === 0);
+                typeButtons.get(type)?.toggleClass('is-selected', count > 0);
+            }
+            rollButton.disabled = totalDice === 0;
         };
-        updateDiceCountDisplay();
 
-        // Dice type buttons grid
-        const diceButtonsContainer = diceManagementSection.createDiv('dice-type-grid');
+        diceTypes.forEach(type => {
+            // As in Atlas: the die's glyph on the button, its name underneath.
+            const cell = diceButtonsContainer.createDiv('dice-type-cell');
+            const button = cell.createEl('button', {
+                cls: 'dice-type-button',
+                attr: { 'aria-label': `${type}: click to add, right-click to remove`, 'data-die': type }
+            });
+            appendDiceIcon(button, type);
+            badges.set(type, button.createSpan('dice-type-badge'));
+            typeButtons.set(type, button);
+            cell.createSpan({ cls: 'dice-type-name', text: type });
 
-        const diceTypes = [
-            { key: 'd4', name: 'D4' },
-            { key: 'd6', name: 'D6' },
-            { key: 'd8', name: 'D8' },
-            { key: 'd10', name: 'D10' },
-            { key: 'd100', name: 'D100' },
-            { key: 'd12', name: 'D12' },
-            { key: 'd20', name: 'D20' }
-        ];
-
-        diceTypes.forEach(dice => {
-            const button = diceButtonsContainer.createEl('button', {
-                text: `+${dice.name}`,
-                cls: 'dice-type-button'
+            button.addEventListener('contextmenu', async (event) => {
+                event.preventDefault();
+                const counts = this.settings.diceCounts as Record<string, number>;
+                if (!counts[type]) return;
+                // The roll in flight tracks its dice by position.
+                if (this.dice?.rollInProgress) {
+                    new Notice('Wait for the roll to finish');
+                    return;
+                }
+                counts[type]--;
+                await this.saveSettings();
+                this.dice?.removeSingleDice(type);
+                updateDiceCountDisplay();
+                this.refreshDiceView();
             });
 
             button.addEventListener('click', async () => {
                 const totalDice = Object.values(this.settings.diceCounts).reduce((sum, count) => sum + count, 0);
                 if (totalDice >= 50) {
-                    button.textContent = 'Max 50!';
+                    new Notice('The tray holds at most 50 dice');
                     button.addClass('is-at-limit');
-                    setTimeout(() => {
-                        button.textContent = `+${dice.name}`;
-                        button.removeClass('is-at-limit');
-                    }, 1500);
+                    setTimeout(() => button.removeClass('is-at-limit'), 1500);
                     return;
                 }
 
-                (this.settings.diceCounts as any)[dice.key]++;
+                (this.settings.diceCounts as any)[type]++;
                 await this.saveSettings();
 
                 // Create the actual dice in the 3D scene
                 if (this.dice) {
-                    this.dice.createSingleDice(dice.key);
+                    this.dice.createSingleDice(type);
                 }
 
                 updateDiceCountDisplay();
                 this.refreshDiceView();
             });
         });
-
-        // Clear all button
-        const clearButton = diceManagementSection.createEl('button', {
-            text: 'Clear All Dice',
-            cls: 'dice-clear-button'
-        });
+        updateDiceCountDisplay();
 
         clearButton.addEventListener('click', async () => {
             Object.keys(this.settings.diceCounts).forEach(key => {
@@ -193,14 +212,6 @@ export default class D20DicePlugin extends Plugin {
         // is over a die, and passes everything else to the note underneath.
         this.updateRollButtonTextCallback = updateRollButtonText;
         this.updateDiceCountDisplayCallback = updateDiceCountDisplay;
-
-
-        // Close button
-        const closeBtn = this.controlsPanel.createEl('button', {
-            text: '×',
-            cls: 'dice-floating-close-btn'
-        });
-        closeBtn.addEventListener('click', () => this.hideDiceOverlay());
 
         // Setup dragging for controls
         this.setupControlsDragging(dragHandle);
@@ -228,7 +239,7 @@ export default class D20DicePlugin extends Plugin {
         // Set up callback for drag-based rolls (now expects string)
         this.dice.onRollComplete = (result: number | string) => {
             this.showResult(result, resultElement);
-            this.handleRollComplete(result);
+            this.handleRollComplete();
         };
 
         // Set up dice status monitoring. The handle lives on the plugin so that
@@ -276,7 +287,7 @@ export default class D20DicePlugin extends Plugin {
             try {
                 const result = await this.dice!.roll();
                 this.showResult(result, resultElement);
-                this.handleRollComplete(result);
+                this.handleRollComplete();
                 statusElement.textContent = 'Roll complete!';
                 rerollButton.hide();
 
@@ -606,6 +617,16 @@ export default class D20DicePlugin extends Plugin {
         delete stored.diceOpacity;
         delete stored.beveledDice;
 
+        // Retired in the Atlas VTT fork: the tray and camera border follow the
+        // overlay on their own, the online API and its chat are gone, and
+        // debug logging is the DEBUG constant in d20-dice.ts.
+        for (const key of [
+            'showWindowBorder', 'windowBorderColor', 'windowBorderOpacity', 'windowBorderWidth',
+            'showSurface', 'surfaceColor', 'surfaceOpacity', 'surfaceBorderColor',
+            'surfaceBorderOpacity', 'surfaceBorderWidth', 'trayWidth', 'trayLength',
+            'apiEnabled', 'apiEndpoint', 'sendRollsToAtlas', 'enableMotionDebug'
+        ]) delete stored[key];
+
         this.settings = Object.assign({}, DEFAULT_SETTINGS, stored, {
             diceCounts: Object.assign({}, DEFAULT_SETTINGS.diceCounts, stored.diceCounts),
             faceMapping: Object.assign({}, DEFAULT_SETTINGS.faceMapping, stored.faceMapping)
@@ -645,159 +666,10 @@ export default class D20DicePlugin extends Plugin {
         }
     }
 
-    refreshApiIntegration(closeExistingViews = true) {
-        // Remove existing chat ribbon icon if it exists
-        if (this.chatRibbonIcon) {
-            this.chatRibbonIcon.remove();
-            this.chatRibbonIcon = null;
-        }
-
-        // Close any open chat views
-        if (closeExistingViews) {
-            this.app.workspace.detachLeavesOfType(CHAT_VIEW_TYPE);
-        }
-
-        // Add chat ribbon icon if API is enabled
-        if (this.settings.apiEnabled) {
-            this.chatRibbonIcon = this.addRibbonIcon('messages-square', 'Open Dice Chat', (evt: MouseEvent) => {
-                this.openChatView();
-            });
-        }
-    }
-
-    async openChatView() {
-        const existing = this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE);
-        if (existing.length > 0) {
-            // Activate existing chat view
-            this.app.workspace.revealLeaf(existing[0]);
-            return;
-        }
-
-        // Create new chat view in right sidebar
-        const leaf = this.app.workspace.getRightLeaf(false);
-        await leaf?.setViewState({
-            type: CHAT_VIEW_TYPE,
-            active: true
-        });
-    }
-
-    // Method to handle dice requests from API when chat is not open
-    handleDiceRequest(expression: string, description: string) {
-        // Parse the expression and set up the dice
-        this.parseDiceExpression(expression);
-
-        // Show the dice overlay if it's not already visible
-        if (!this.isVisible) {
-            this.showDiceOverlay();
-        }
-
-        // Show a notice about the dice request
-        new Notice(`Dice request received: ${expression} - ${description}`);
-    }
-
-    private parseDiceExpression(expression: string) {
-        // Clear current dice counts and existing dice
-        Object.keys(this.settings.diceCounts).forEach(key => {
-            (this.settings.diceCounts as any)[key] = 0;
-        });
-
-        // Clear existing dice from the scene if dice engine exists
-        if (this.dice) {
-            this.dice.clearAllDice();
-        }
-
-        // Simple parser for expressions like "2d6+1d20+3"
-        const diceMatches = expression.match(/(\d+)?d(\d+)/g);
-
-        if (diceMatches) {
-            diceMatches.forEach(match => {
-                const diceMatch = match.match(/(\d+)?d(\d+)/);
-                if (diceMatch) {
-                    const count = parseInt(diceMatch[1]) || 1;
-                    const sides = diceMatch[2];
-                    const diceType = `d${sides}`;
-
-                    if (this.settings.diceCounts.hasOwnProperty(diceType)) {
-                        (this.settings.diceCounts as any)[diceType] += count;
-
-                        // Create the actual dice in the 3D scene if dice engine exists
-                        if (this.dice) {
-                            for (let i = 0; i < count; i++) {
-                                this.dice.createSingleDice(diceType);
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        this.saveSettings();
-
-        // Update the dice count display if the overlay is open
-        if (this.updateDiceCountDisplayCallback) {
-            this.updateDiceCountDisplayCallback();
-        }
-
-        // Refresh the dice view to show the new dice
-        this.refreshDiceView();
-    }
-
-    private async handleRollComplete(result: number | string) {
-        // Only submit to API if online mode is enabled
-        if (!this.settings.apiEnabled) {
-            return;
-        }
-
-        try {
-            // Get the connected chat view to access API client
-            const chatViews = this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE);
-            if (chatViews.length > 0) {
-                const chatView = chatViews[0].view as DiceChatView;
-                if (chatView && (chatView as any).isConnected) {
-                    // Determine the expression from the result
-                    let expression = '';
-                    if (typeof result === 'string') {
-                        // Parse the result string to extract the expression
-                        const match = result.match(/^(.+?)=/);
-                        if (match) {
-                            expression = match[1];
-                        } else {
-                            expression = result; // Fallback
-                        }
-                    } else {
-                        // Simple number result, assume it's from dice counts
-                        const diceParts: string[] = [];
-                        Object.entries(this.settings.diceCounts).forEach(([diceType, count]) => {
-                            if (count > 0) {
-                                diceParts.push(count === 1 ? diceType : `${count}${diceType}`);
-                            }
-                        });
-                        expression = diceParts.join(' + ') || 'd20';
-                    }
-
-                    // Create a mock dice roll result for API
-                    const diceRollResult = {
-                        id: Date.now(),
-                        expression: expression,
-                        raw_rolls: {},
-                        modifiers: [],
-                        total: typeof result === 'number' ? result : parseInt(result.split('=').pop() || '0'),
-                        is_critical: false,
-                        is_fumble: false,
-                        breakdown: typeof result === 'string' ? result : `${expression}=${result}`
-                    };
-
-                    // Submit to chat via API
-                    await (chatView as any).apiClient.sendDiceResult(diceRollResult);
-
-                    // Show confirmation
-                    new Notice(`Roll shared in chat: ${diceRollResult.breakdown}`);
-                }
-            }
-        } catch (error) {
-            console.error('Failed to submit roll to API:', error);
-            new Notice('Failed to share roll in chat');
-        }
+    /** Every settled roll goes to Atlas VTT: its toast, roll log and player view. */
+    private handleRollComplete(): void {
+        const rolled = this.dice?.takeLastRoll() ?? null;
+        if (rolled) sendRollToAtlas(rolled);
     }
 
     private updateDiceStatusDisplay(
