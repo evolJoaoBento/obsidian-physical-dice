@@ -1,4 +1,4 @@
-import { Plugin, Notice, debounce, setIcon } from 'obsidian';
+import { Menu, Plugin, Notice, debounce, setIcon } from 'obsidian';
 import { D20Dice, DicePack, type RolledDie } from './d20-dice';
 import { DiceSettings, DEFAULT_SETTINGS, DiceSettingTab, type DiceColor } from './settings';
 import { sendRollToAtlas } from './atlas-bridge';
@@ -8,8 +8,6 @@ export default class D20DicePlugin extends Plugin {
     settings: DiceSettings;
     private diceOverlay: HTMLElement | null = null;
     private dice: D20Dice | null = null;
-    /** The colour new dice are added in; null wears the pack's. */
-    private selectedDiceColor: string | null = null;
     private isVisible = false;
     private controlsPanel: HTMLElement | null = null;
     private isDraggingControls = false;
@@ -83,30 +81,6 @@ export default class D20DicePlugin extends Plugin {
         setIcon(closeBtn, 'x');
         closeBtn.addEventListener('click', () => this.hideDiceOverlay());
 
-        // Colour row: the colour the next dice are added in. Hidden with no colours set up.
-        const colorRow = this.controlsPanel.createDiv('dice-color-row');
-        const colorButtons = new Map<string | null, HTMLElement>();
-        const selectColor = (color: string | null) => {
-            this.selectedDiceColor = color;
-            for (const [value, swatch] of colorButtons) swatch.toggleClass('is-active', value === color);
-        };
-        const colorChoices: Array<{ color: string | null; name: string }> = [
-            { color: null, name: 'Pack colour' },
-            ...this.settings.diceColors.map((c) => ({ color: c.color, name: c.name || c.color })),
-        ];
-        if (!this.settings.diceColors.some((c) => c.color === this.selectedDiceColor)) this.selectedDiceColor = null;
-        for (const choice of colorChoices) {
-            const swatch = colorRow.createEl('button', {
-                cls: `dice-color-swatch${choice.color ? '' : ' is-pack'}`,
-                attr: { 'aria-label': `Add dice in ${choice.name}` }
-            });
-            if (choice.color) swatch.style.setProperty('--dice-swatch', choice.color);
-            swatch.addEventListener('click', () => selectColor(choice.color));
-            colorButtons.set(choice.color, swatch);
-        }
-        selectColor(this.selectedDiceColor);
-        if (this.settings.diceColors.length > 0) colorRow.show(); else colorRow.hide();
-
         // Dice row: one button per type, adding a die; the badge counts them.
         const diceButtonsContainer = this.controlsPanel.createDiv('dice-type-grid');
 
@@ -168,56 +142,74 @@ export default class D20DicePlugin extends Plugin {
             rollButton.disabled = totalDice === 0;
         };
 
+        const addDie = async (type: string, color: string | null, button: HTMLElement): Promise<void> => {
+            const totalDice = Object.values(this.settings.diceCounts).reduce((sum, count) => sum + count, 0);
+            if (totalDice >= 50) {
+                new Notice('The tray holds at most 50 dice');
+                button.addClass('is-at-limit');
+                setTimeout(() => button.removeClass('is-at-limit'), 1500);
+                return;
+            }
+            (this.settings.diceCounts as Record<string, number>)[type]++;
+            this.dice?.createSingleDice(type, color);
+            updateDiceCountDisplay();
+            this.refreshDiceView();
+            await this.saveSettings();
+        };
+
+        const removeDie = async (type: string): Promise<void> => {
+            const counts = this.settings.diceCounts as Record<string, number>;
+            if (!counts[type]) return;
+            // The roll in flight tracks its dice by position.
+            if (this.dice?.rollInProgress) {
+                new Notice('Wait for the roll to finish');
+                return;
+            }
+            if (this.dice && !this.dice.removeSingleDice(type)) return;
+            counts[type]--;
+            updateDiceCountDisplay();
+            this.refreshDiceView();
+            await this.saveSettings();
+        };
+
         diceTypes.forEach(type => {
             // As in Atlas: the die's glyph on the button, its name underneath.
             const cell = diceButtonsContainer.createDiv('dice-type-cell');
             const button = cell.createEl('button', {
                 cls: 'dice-type-button',
-                attr: { 'aria-label': `${type}: click to add, right-click to remove`, 'data-die': type }
+                attr: { 'aria-label': `${type}: click to add, right-click for colours`, 'data-die': type }
             });
             appendDiceIcon(button, type);
             badges.set(type, button.createSpan('dice-type-badge'));
             typeButtons.set(type, button);
             cell.createSpan({ cls: 'dice-type-name', text: type });
 
-            button.addEventListener('contextmenu', async (event) => {
+            // Click: a die in the pack's colour. Right-click: the colours to add
+            // it in, and removing one; with no colours set up, it just removes one.
+            button.addEventListener('click', () => void addDie(type, null, button));
+            button.addEventListener('contextmenu', (event) => {
                 event.preventDefault();
-                const counts = this.settings.diceCounts as Record<string, number>;
-                if (!counts[type]) return;
-                // The roll in flight tracks its dice by position.
-                if (this.dice?.rollInProgress) {
-                    new Notice('Wait for the roll to finish');
+                if (this.settings.diceColors.length === 0) {
+                    void removeDie(type);
                     return;
                 }
-                // The last die of this type in the selected colour.
-                if (this.dice && !this.dice.removeSingleDice(type, this.selectedDiceColor)) return;
-                counts[type]--;
-                await this.saveSettings();
-                updateDiceCountDisplay();
-                this.refreshDiceView();
-            });
-
-            button.addEventListener('click', async () => {
-                // Taken now: another swatch may be picked while the save below runs.
-                const color = this.selectedDiceColor;
-                const totalDice = Object.values(this.settings.diceCounts).reduce((sum, count) => sum + count, 0);
-                if (totalDice >= 50) {
-                    new Notice('The tray holds at most 50 dice');
-                    button.addClass('is-at-limit');
-                    setTimeout(() => button.removeClass('is-at-limit'), 1500);
-                    return;
+                const menu = new Menu();
+                for (const entry of this.settings.diceColors) {
+                    menu.addItem((item) => {
+                        item.setTitle(`${entry.name || entry.color} ${type}`)
+                            .setIcon('circle')
+                            .onClick(() => void addDie(type, entry.color, button));
+                        // Tint the item's dot with its colour, where Obsidian exposes it.
+                        (item as unknown as { iconEl?: HTMLElement }).iconEl?.style.setProperty('color', entry.color);
+                    });
                 }
-
-                (this.settings.diceCounts as any)[type]++;
-                await this.saveSettings();
-
-                // Create the actual dice in the 3D scene
-                if (this.dice) {
-                    this.dice.createSingleDice(type, color);
-                }
-
-                updateDiceCountDisplay();
-                this.refreshDiceView();
+                menu.addSeparator();
+                menu.addItem((item) => item
+                    .setTitle(`Remove a ${type}`)
+                    .setIcon('minus')
+                    .setDisabled(!(this.settings.diceCounts as Record<string, number>)[type])
+                    .onClick(() => void removeDie(type)));
+                menu.showAtMouseEvent(event);
             });
         });
         updateDiceCountDisplay();
