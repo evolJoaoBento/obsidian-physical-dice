@@ -2,22 +2,6 @@ import { App, PluginSettingTab, Setting, Notice } from 'obsidian';
 import D20DicePlugin from './main';
 
 export interface DiceSettings {
-    // Camera window border
-    showWindowBorder: boolean;
-    windowBorderColor: string;
-    windowBorderOpacity: number;
-    windowBorderWidth: number;
-
-    // Surface background
-    showSurface: boolean;
-    surfaceColor: string;
-    surfaceOpacity: number;
-    surfaceBorderColor: string;
-    surfaceBorderOpacity: number;
-    surfaceBorderWidth: number;
-    trayWidth: number;
-    trayLength: number;
-
     // Dice configuration
     diceType: 'd4' | 'd6' | 'd8' | 'd10' | 'd12' | 'd20'; // Legacy - will be removed
     diceSize: number;
@@ -58,9 +42,6 @@ export interface DiceSettings {
     highlightCompletedDice: boolean;
     completedDiceHighlightColor: string;
 
-    // Debug settings
-    enableMotionDebug: boolean;
-
     // Face calibration mapping
     /**
      * Folder under the plugin's dice/ directory holding one atlas per die type,
@@ -71,29 +52,9 @@ export interface DiceSettings {
 
     faceMapping: { [faceIndex: number]: number };
 
-    // API Integration settings
-    apiEnabled: boolean;
-    apiEndpoint: string;
-
 }
 
 export const DEFAULT_SETTINGS: DiceSettings = {
-    // Camera window border defaults
-    showWindowBorder: false,
-    windowBorderColor: '#ffffff',
-    windowBorderOpacity: 0.3,
-    windowBorderWidth: 2,
-
-    // Surface background defaults
-    showSurface: false,
-    surfaceColor: '#8B4513',
-    surfaceOpacity: 0.1,
-    surfaceBorderColor: '#654321',
-    surfaceBorderOpacity: 0.3,
-    surfaceBorderWidth: 2,
-    trayWidth: 1.0,
-    trayLength: 1.0,
-
     // Dice defaults
     diceType: 'd20', // Legacy - will be removed
     diceSize: 0.8,
@@ -142,9 +103,6 @@ export const DEFAULT_SETTINGS: DiceSettings = {
     highlightCompletedDice: false,
     completedDiceHighlightColor: '#00ff00',
 
-    // Debug defaults
-    enableMotionDebug: false,
-
     // Face mapping defaults (1:1 mapping initially)
     texturePack: 'Texture-Pack-Default',
 
@@ -152,10 +110,6 @@ export const DEFAULT_SETTINGS: DiceSettings = {
         0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9, 9: 10,
         10: 11, 11: 12, 12: 13, 13: 14, 14: 15, 15: 16, 16: 17, 17: 18, 18: 19, 19: 20
     },
-
-    // API Integration defaults
-    apiEnabled: false,
-    apiEndpoint: 'http://localhost:5000'
 
 };
 
@@ -205,158 +159,6 @@ export class DiceSettingTab extends PluginSettingTab {
         containerEl.empty();
 
         containerEl.createEl('h2', { text: 'D20 Dice Roller Settings' });
-
-        // Camera Window Border Section
-        const windowBorderSection = this.createCollapsibleSection(containerEl, 'Camera Window Border', 'window-border');
-
-        new Setting(windowBorderSection)
-            .setName('Show window border')
-            .setDesc('Display a border around the 3D view window')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.showWindowBorder)
-                .onChange(async (value) => {
-                    this.plugin.settings.showWindowBorder = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(windowBorderSection)
-            .setName('Border color')
-            .setDesc('Color of the window border')
-            .addColorPicker(color => color
-                .setValue(this.plugin.settings.windowBorderColor)
-                .onChange(async (value) => {
-                    this.plugin.settings.windowBorderColor = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(windowBorderSection)
-            .setName('Border opacity')
-            .setDesc('Transparency of the window border (0 = invisible, 1 = opaque)')
-            .addSlider(slider => slider
-                .setLimits(0, 1, 0.1)
-                .setValue(this.plugin.settings.windowBorderOpacity)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.windowBorderOpacity = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(windowBorderSection)
-            .setName('Border width')
-            .setDesc('Width of the window border in pixels')
-            .addSlider(slider => slider
-                .setLimits(1, 10, 1)
-                .setValue(this.plugin.settings.windowBorderWidth)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.windowBorderWidth = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        // Surface Background Section
-        const surfaceSection = this.createCollapsibleSection(containerEl, 'Dice Tray Surface', 'surface');
-
-        new Setting(surfaceSection)
-            .setName('Show dice tray')
-            .setDesc('Display a visible surface for the dice to roll on')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.showSurface)
-                .onChange(async (value) => {
-                    this.plugin.settings.showSurface = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(surfaceSection)
-            .setName('Surface color')
-            .setDesc('Color of the dice tray surface')
-            .addColorPicker(color => color
-                .setValue(this.plugin.settings.surfaceColor)
-                .onChange(async (value) => {
-                    this.plugin.settings.surfaceColor = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(surfaceSection)
-            .setName('Surface opacity')
-            .setDesc('Transparency of the surface (0 = invisible, 1 = opaque)')
-            .addSlider(slider => slider
-                .setLimits(0, 1, 0.1)
-                .setValue(this.plugin.settings.surfaceOpacity)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.surfaceOpacity = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(surfaceSection)
-            .setName('Surface border color')
-            .setDesc('Color of the surface border')
-            .addColorPicker(color => color
-                .setValue(this.plugin.settings.surfaceBorderColor)
-                .onChange(async (value) => {
-                    this.plugin.settings.surfaceBorderColor = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(surfaceSection)
-            .setName('Surface border opacity')
-            .setDesc('Transparency of the surface border')
-            .addSlider(slider => slider
-                .setLimits(0, 1, 0.1)
-                .setValue(this.plugin.settings.surfaceBorderOpacity)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.surfaceBorderOpacity = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(surfaceSection)
-            .setName('Surface border width')
-            .setDesc('Width of the surface border')
-            .addSlider(slider => slider
-                .setLimits(0, 5, 0.5)
-                .setValue(this.plugin.settings.surfaceBorderWidth)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.surfaceBorderWidth = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(surfaceSection)
-            .setName('Tray width')
-            .setDesc('Width of the dice tray (0.5 = narrow, 1.5 = wide)')
-            .addSlider(slider => slider
-                .setLimits(0.3, 2.0, 0.1)
-                .setValue(this.plugin.settings.trayWidth)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.trayWidth = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
-
-        new Setting(surfaceSection)
-            .setName('Tray length')
-            .setDesc('Length of the dice tray (0.5 = short, 1.5 = long)')
-            .addSlider(slider => slider
-                .setLimits(0.3, 2.0, 0.1)
-                .setValue(this.plugin.settings.trayLength)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.trayLength = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshDiceView();
-                }));
 
         // Dice Configuration Section
         const diceSection = this.createCollapsibleSection(containerEl, 'Dice Configuration', 'dice');
@@ -567,46 +369,6 @@ export class DiceSettingTab extends PluginSettingTab {
                     this.plugin.settings.completedDiceHighlightColor = value;
                     await this.plugin.saveSettings();
                     this.plugin.refreshDiceView();
-                }));
-
-        // API Integration Section
-        const apiSection = this.createCollapsibleSection(containerEl, 'API Integration', 'api');
-
-        new Setting(apiSection)
-            .setName('Enable online dice system')
-            .setDesc('Enable integration with online dice roll API for multiplayer dice rolling')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.apiEnabled)
-                .onChange(async (value) => {
-                    this.plugin.settings.apiEnabled = value;
-                    await this.plugin.saveSettings();
-                    // Trigger refresh to show/hide ribbon icon
-                    this.plugin.refreshApiIntegration();
-                }));
-
-        new Setting(apiSection)
-            .setName('API endpoint')
-            .setDesc('URL of the dice roll API server (e.g., http://localhost:5000 or https://your-server.com)')
-            .addText(text => text
-                .setPlaceholder('http://localhost:5000')
-                .setValue(this.plugin.settings.apiEndpoint)
-                .onChange(async (value) => {
-                    this.plugin.settings.apiEndpoint = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        // Debug Settings Section
-        const debugSection = this.createCollapsibleSection(containerEl, 'Debug Settings', 'debug');
-
-        new Setting(debugSection)
-            .setName('Enable motion debug logging')
-            .setDesc('Show detailed motion detection information in browser console. Useful for troubleshooting but can be overwhelming.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.enableMotionDebug)
-                .onChange(async (value) => {
-                    console.log('⚙️ Motion debug logging', value ? 'enabled' : 'disabled');
-                    this.plugin.settings.enableMotionDebug = value;
-                    await this.plugin.saveSettings();
                 }));
     }
 }

@@ -63,11 +63,10 @@ try {
     record('engine created', !!dice);
 
     // --- add one of every type through the real buttons ----------------------
-    const typeButton = (label) =>
-        [...panel.querySelectorAll('.dice-type-button')].find((b) => b.textContent.trim() === label);
+    const typeButton = (type) => panel.querySelector(`.dice-type-button[data-die="${type}"]`);
 
     dice.clearAllDice();
-    for (const t of ['+D4', '+D6', '+D8', '+D10', '+D12', '+D20']) typeButton(t)?.click();
+    for (const t of ['d4', 'd6', 'd8', 'd10', 'd12', 'd20']) typeButton(t)?.click();
     await wait(400);
     record('six dice added via panel', dice.diceArray.length === 6, `count=${dice.diceArray.length}`);
     record('one blob per die', dice.blobShadows.length === dice.diceArray.length,

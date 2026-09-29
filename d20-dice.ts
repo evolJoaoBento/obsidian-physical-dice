@@ -238,6 +238,11 @@ const PACK_FALLBACK: Required<Pick<PackDie, 'scale' | 'rimUV' | 'color'>> = {
 
 const BEVEL_FALLBACK = { enabled: true, depth: 0.1, smooth: 0 };
 
+/** One die of a settled roll: its type (`d20`) and the number it came up. */
+export interface RolledDie {
+    type: string;
+    value: number;
+}
 
 export class D20Dice {
     private scene: THREE.Scene;
@@ -267,8 +272,6 @@ export class D20Dice {
     private diceTypeArray: string[] = [];
     private selectedDice: THREE.Mesh[] = [];
     private draggedDiceIndex = -1;
-    private trayMesh: THREE.Mesh | null = null;
-    private trayBorder: THREE.LineSegments | null = null;
     private trayBodies: CANNON.Body[] = [];
     /** One blurred disc per die, index-aligned with diceArray. */
     private blobShadows: THREE.Mesh[] = [];
@@ -278,11 +281,16 @@ export class D20Dice {
     /** World Y the blobs sit on: where the dice actually come to rest. */
     private shadowPlaneY = -2.38;
     private isTearingDown = false;
-    private windowBorder: HTMLElement | null = null;
     private hoverCircle: THREE.Mesh | null = null;
     private hoverCircleMaterial: THREE.MeshBasicMaterial | null = null;
     private floorHeight = -2.4;
     public onRollComplete: ((result: number | string) => void) | null = null;
+    /**
+     * The dice behind the last result, one entry per die. The result string is
+     * for people and comes in several shapes; this is what other plugins read.
+     * Null when the last roll had no valid reading (a caught die).
+     */
+    private lastRoll: RolledDie[] | null = null;
     private ambientLight: THREE.AmbientLight | null = null;
     private directionalLight: THREE.DirectionalLight | null = null;
     public isViewActive: boolean = true; // Track if the view is active
@@ -412,9 +420,6 @@ export class D20Dice {
 
             this.container.appendChild(canvas);
 
-            // Create window border if enabled
-            this.createWindowBorder();
-
             // Set initial size to fill container
             this.setInitialSize();
 
@@ -481,13 +486,12 @@ export class D20Dice {
      * deeper than it top to bottom, and the brown border drew that mismatch on
      * screen. Dice also bounced off walls that were nowhere near the edges.
      *
-     * `trayWidth` and `trayLength` are multipliers of the visible area now,
-     * so 1.0 means "exactly what you can see".
+     * The tray is exactly what you can see, and follows the overlay as it resizes.
      */
     private trayDimensions(): { width: number; length: number } {
         return {
-            width: (this.camera.right - this.camera.left) * this.settings.trayWidth,
-            length: (this.camera.top - this.camera.bottom) * this.settings.trayLength
+            width: this.camera.right - this.camera.left,
+            length: this.camera.top - this.camera.bottom
         };
     }
 
@@ -497,40 +501,6 @@ export class D20Dice {
         // floor plane, four more walls and another set of border lines onto the
         // world — the broadphase then paid for all of them, forever.
         this.removeDiceTray();
-
-        // Create visual tray based on settings
-        if (this.settings.showSurface) {
-            const { width: trayWidth, length: trayLength } = this.trayDimensions();
-            const trayGeometry = new THREE.BoxGeometry(trayWidth, 0.8, trayLength);
-            const trayMaterial = new THREE.MeshPhongMaterial({
-                color: this.settings.surfaceColor,
-                transparent: this.settings.surfaceOpacity < 1,
-                opacity: this.settings.surfaceOpacity
-            });
-            this.trayMesh = new THREE.Mesh(trayGeometry, trayMaterial);
-            // The box is 0.8 tall, so centring it 0.4 below the floor puts its
-            // top face exactly on the floor. Centred at -2 — where it was — its
-            // top sat at -1.6 while dice rested at -2.4, and every die was
-            // buried 0.8 deep inside the surface it appeared to rest on.
-            // Nothing moves on screen: the camera is orthographic looking
-            // straight down, so Y is depth.
-            this.trayMesh.position.set(0, FLOOR_Y - 0.4, 0);
-            this.scene.add(this.trayMesh);
-
-            // Add border if enabled (using tray's own border settings)
-            if (this.settings.surfaceBorderWidth > 0 && this.settings.surfaceBorderOpacity > 0) {
-                const borderGeometry = new THREE.EdgesGeometry(trayGeometry);
-                const borderMaterial = new THREE.LineBasicMaterial({
-                    color: this.settings.surfaceBorderColor,
-                    transparent: this.settings.surfaceBorderOpacity < 1,
-                    opacity: this.settings.surfaceBorderOpacity,
-                    linewidth: this.settings.surfaceBorderWidth
-                });
-                this.trayBorder = new THREE.LineSegments(borderGeometry, borderMaterial);
-                this.trayBorder.position.copy(this.trayMesh.position);
-                this.scene.add(this.trayBorder);
-            }
-        }
 
         // Physics tray floor - realistic felt surface
         const floorMaterial = new CANNON.Material('floor');
@@ -739,20 +709,6 @@ export class D20Dice {
     }
 
     private removeDiceTray(): void {
-        if (this.trayMesh) {
-            this.scene.remove(this.trayMesh);
-            this.trayMesh.geometry.dispose();
-            (this.trayMesh.material as THREE.Material).dispose();
-            this.trayMesh = null;
-        }
-
-        if (this.trayBorder) {
-            this.scene.remove(this.trayBorder);
-            this.trayBorder.geometry.dispose();
-            (this.trayBorder.material as THREE.Material).dispose();
-            this.trayBorder = null;
-        }
-
         for (const body of this.trayBodies) {
             this.world.removeBody(body);
         }
@@ -2593,10 +2549,12 @@ export class D20Dice {
                 // Dice is caught - highlight it and show in result
                 this.highlightCaughtDice(diceIndex, true);
                 formattedResult = `1${diceType}(CAUGHT) = CAUGHT - Face confidence: ${checkResult.confidence.toFixed(3)}, required: ${checkResult.requiredConfidence.toFixed(3)}`;
+                this.lastRoll = null;
                 log(`🥅 Single dice ${diceIndex} (${diceType}) CAUGHT! Face confidence: ${checkResult.confidence.toFixed(3)}, required: ${checkResult.requiredConfidence.toFixed(3)}`);
             } else {
                 // Valid result
                 formattedResult = `1${diceType}(${checkResult.result}) = ${checkResult.result}`;
+                this.lastRoll = [{ type: diceType, value: checkResult.result }];
                 log(`📊 Single dice roll result: ${formattedResult}`);
             }
 
@@ -2659,10 +2617,12 @@ export class D20Dice {
         // Calculate results for all dice using physics-based face detection
         const results: { [key: string]: number[] } = {};
         let totalSum = 0;
+        const rolled: RolledDie[] = [];
 
         for (let i = 0; i < this.diceArray.length; i++) {
             const diceType = this.diceTypeArray[i];
             const result = this.getTopFaceNumberForDice(i);
+            rolled.push({ type: diceType, value: result });
 
             if (!results[diceType]) {
                 results[diceType] = [];
@@ -2673,6 +2633,7 @@ export class D20Dice {
 
         // Format the result string
         const formattedResult = this.formatRollResults(results, totalSum);
+        this.lastRoll = rolled;
         log(`📊 Final roll result: ${formattedResult}`);
 
         this.isRolling = false;
@@ -4107,6 +4068,12 @@ export class D20Dice {
             // Note: Forces already applied above, just start monitoring
             this.startIndividualDiceMonitoring(
                 (result) => {
+                    // The force-stop timeout would report this throw a second
+                    // time, with whatever faces are up by then.
+                    if (this.rollTimeout) {
+                        clearTimeout(this.rollTimeout);
+                        this.rollTimeout = null;
+                    }
                     // On completion, trigger callback
                     if (this.onRollComplete) {
                         this.onRollComplete(result);
@@ -4254,6 +4221,7 @@ export class D20Dice {
     private calculateResult(): void {
         const result = this.getTopFaceNumber();
         log(`Natural dice result: ${result}`);
+        this.lastRoll = [{ type: this.settings.diceType, value: result }];
 
         // Snap behavior removed - UV mapping handles proper face display
 
@@ -4718,29 +4686,6 @@ export class D20Dice {
         }
     }
 
-    private createWindowBorder() {
-        if (this.settings.showWindowBorder) {
-            this.windowBorder = document.createElement('div');
-            this.windowBorder.style.position = 'absolute';
-            this.windowBorder.style.top = '0';
-            this.windowBorder.style.left = '0';
-            this.windowBorder.style.width = '100%';
-            this.windowBorder.style.height = '100%';
-            this.windowBorder.style.border = `${this.settings.windowBorderWidth}px solid ${this.settings.windowBorderColor}`;
-            this.windowBorder.style.opacity = this.settings.windowBorderOpacity.toString();
-            this.windowBorder.style.pointerEvents = 'none';
-            this.windowBorder.style.boxSizing = 'border-box';
-            this.container.appendChild(this.windowBorder);
-        }
-    }
-
-    private removeWindowBorder() {
-        if (this.windowBorder) {
-            this.container.removeChild(this.windowBorder);
-            this.windowBorder = null;
-        }
-    }
-
     /**
      * Build every die on the table again, keeping the set that was on it.
      *
@@ -4759,14 +4704,7 @@ export class D20Dice {
     }
 
     public updateSettings(newSettings: DiceSettings) {
-        const trayResized = this.settings.trayWidth !== newSettings.trayWidth ||
-            this.settings.trayLength !== newSettings.trayLength;
         this.settings = newSettings;
-
-        // Update window border
-        this.removeWindowBorder();
-        this.createWindowBorder();
-
 
         // Update dice material properties
         if (this.dice && this.dice.material) {
@@ -4788,13 +4726,6 @@ export class D20Dice {
 
         // Update lighting (this also refits the shadow camera to the tray)
         this.setupLighting();
-
-        // Moving the walls under sleeping dice can leave one outside the tray,
-        // and a sleeping body will never notice. Only the tray size can do that,
-        // so the other settings do not disturb dice that have already settled.
-        if (trayResized) {
-            for (const body of this.diceBodyArray) body?.wakeUp();
-        }
 
         this.wake();
     }
@@ -4821,9 +4752,6 @@ export class D20Dice {
             this.hoverCircle = null;
             this.hoverCircleMaterial = null;
         }
-
-        // Clean up window border
-        this.removeWindowBorder();
 
         // Remove event listeners
         if (this.renderer) {
@@ -4941,6 +4869,21 @@ export class D20Dice {
     private currentMonitor: (() => void) | null = null;
     private originalMaterials: Map<number, THREE.Material | THREE.Material[]> = new Map();
 
+    /**
+     * The dice of the last settled roll, handed over once. Some rolls report
+     * through more than one path; taking clears it so each is passed on once.
+     */
+    /** True while dice are in the air or a roll is still being read. */
+    public get rollInProgress(): boolean {
+        return this.isRolling || this.currentMonitor !== null;
+    }
+
+    public takeLastRoll(): RolledDie[] | null {
+        const roll = this.lastRoll;
+        this.lastRoll = null;
+        return roll;
+    }
+
     // Enhanced roll method with individual dice detection
     public async roll(): Promise<string> {
         return new Promise((resolve, reject) => {
@@ -4970,6 +4913,7 @@ export class D20Dice {
 
     private initializeDiceStates() {
         this.diceStates = [];
+        this.lastRoll = null;
         for (let i = 0; i < this.diceArray.length; i++) {
             this.diceStates.push({
                 index: i,
@@ -5162,6 +5106,7 @@ export class D20Dice {
                         .join(' + ');
 
                     const resultString = `${breakdown} = ${total}`;
+                    this.lastRoll = this.diceStates.map(state => ({ type: state.type, value: state.result! }));
                     log(`🏆 All dice complete! Result: ${resultString}`);
 
                     // Clear monitoring state
@@ -5188,6 +5133,7 @@ export class D20Dice {
                     const breakdown = partialResults
                         .map((result, i) => `${this.diceStates[i].type}=${result}`)
                         .join(' + ');
+                    this.lastRoll = partialResults.map((value, i) => ({ type: this.diceStates[i].type, value }));
 
                     // Clear all highlights before resolving
                     this.clearAllHighlights();
