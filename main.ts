@@ -1,4 +1,4 @@
-import { Menu, Plugin, Notice, debounce, setIcon } from 'obsidian';
+import { Plugin, Notice, debounce, setIcon } from 'obsidian';
 import { D20Dice, DicePack, type RolledDie } from './d20-dice';
 import { DiceSettings, DEFAULT_SETTINGS, DiceSettingTab, type DiceColor } from './settings';
 import { sendRollToAtlas } from './atlas-bridge';
@@ -8,6 +8,8 @@ export default class D20DicePlugin extends Plugin {
     settings: DiceSettings;
     private diceOverlay: HTMLElement | null = null;
     private dice: D20Dice | null = null;
+    /** Closes the column of colours a right-click opened over a die, when one is showing. */
+    private closeColorPicker: (() => void) | null = null;
     private isVisible = false;
     private controlsPanel: HTMLElement | null = null;
     private isDraggingControls = false;
@@ -184,8 +186,9 @@ export default class D20DicePlugin extends Plugin {
             typeButtons.set(type, button);
             cell.createSpan({ cls: 'dice-type-name', text: type });
 
-            // Click: a die in the pack's colour. Right-click: the colours to add
-            // it in, and removing one; with no colours set up, it just removes one.
+            // Click: a die in the pack's colour. Right-click: a column of the dice
+            // colours over the button, each adding it in that colour; with no
+            // colours set up, right-click removes one.
             button.addEventListener('click', () => void addDie(type, null, button));
             button.addEventListener('contextmenu', (event) => {
                 event.preventDefault();
@@ -193,23 +196,7 @@ export default class D20DicePlugin extends Plugin {
                     void removeDie(type);
                     return;
                 }
-                const menu = new Menu();
-                for (const entry of this.settings.diceColors) {
-                    menu.addItem((item) => {
-                        item.setTitle(`${entry.name || entry.color} ${type}`)
-                            .setIcon('circle')
-                            .onClick(() => void addDie(type, entry.color, button));
-                        // Tint the item's dot with its colour, where Obsidian exposes it.
-                        (item as unknown as { iconEl?: HTMLElement }).iconEl?.style.setProperty('color', entry.color);
-                    });
-                }
-                menu.addSeparator();
-                menu.addItem((item) => item
-                    .setTitle(`Remove a ${type}`)
-                    .setIcon('minus')
-                    .setDisabled(!(this.settings.diceCounts as Record<string, number>)[type])
-                    .onClick(() => void removeDie(type)));
-                menu.showAtMouseEvent(event);
+                this.showColorPicker(type, button, (color) => void addDie(type, color, button));
             });
         });
         updateDiceCountDisplay();
@@ -497,7 +484,43 @@ export default class D20DicePlugin extends Plugin {
         this.dice.updateSize(rect.width, rect.height);
     }
 
+    /**
+     * A column of the dice colours rising from `button`, over the panel. It stays
+     * open for adding several dice, and closes on a click elsewhere or Escape.
+     */
+    private showColorPicker(type: string, button: HTMLElement, onPick: (color: string) => void): void {
+        this.closeColorPicker?.();
+        const rect = button.getBoundingClientRect();
+        const picker = document.body.createDiv({ cls: 'dice-color-picker', attr: { role: 'group', 'aria-label': `Add a ${type} in a colour` } });
+        picker.style.left = `${rect.left + rect.width / 2}px`;
+        picker.style.top = `${rect.top}px`;
+
+        for (const entry of this.settings.diceColors) {
+            const circle = picker.createEl('button', {
+                cls: 'dice-color-circle',
+                attr: { 'aria-label': `${entry.name || entry.color} ${type}` }
+            });
+            circle.style.setProperty('--dice-swatch', entry.color);
+            circle.addEventListener('click', () => onPick(entry.color));
+        }
+
+        const close = (event: Event) => {
+            if (event instanceof KeyboardEvent && event.key !== 'Escape') return;
+            if (event.target instanceof Node && picker.contains(event.target)) return;
+            this.closeColorPicker?.();
+        };
+        document.addEventListener('mousedown', close, true);
+        document.addEventListener('keydown', close, true);
+        this.closeColorPicker = () => {
+            document.removeEventListener('mousedown', close, true);
+            document.removeEventListener('keydown', close, true);
+            picker.remove();
+            this.closeColorPicker = null;
+        };
+    }
+
     private hideDiceOverlay() {
+        this.closeColorPicker?.();
         for (const cleanup of this.overlayCleanups) cleanup();
         this.overlayCleanups = [];
 
