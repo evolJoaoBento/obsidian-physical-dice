@@ -444,7 +444,9 @@ export class D20Dice {
 
     private initPhysics() {
         this.world = new CANNON.World();
-        this.world.gravity.set(0, -9.82, 0); // Realistic Earth gravity (9.82 m/s²)
+        // Dice are several world units across, so Earth's 9.82 makes them fall like boulders.
+        // Gravity scaled to their size makes them drop and settle like real dice.
+        this.world.gravity.set(0, -60, 0);
         log(`🌍 Physics world initialized with gravity: ${this.world.gravity.y}`);
 
         // Body.allowSleep defaults to true and every die sets sleepSpeedLimit /
@@ -4025,7 +4027,8 @@ export class D20Dice {
         const rollingSingleDice = this.draggedDiceIndex >= 0;
 
         // Use mouse velocity for realistic momentum-based throwing
-        const velocityMultiplier = 50;
+        // Scaled with gravity (about sqrt(60 / 9.82)) so throws keep their reach.
+        const velocityMultiplier = 120;
         const baseThrowForce = new CANNON.Vec3(
             this.mouseVelocity.x * velocityMultiplier,
             -Math.max(Math.abs(this.mouseVelocity.x + this.mouseVelocity.y) * velocityMultiplier * 0.5, 3),
@@ -4033,7 +4036,7 @@ export class D20Dice {
         );
 
         // Cap maximum force to prevent dice from flying too far
-        const maxForce = 25;
+        const maxForce = 60;
         const forceLength = baseThrowForce.length();
         if (forceLength > maxForce) {
             baseThrowForce.scale(maxForce / forceLength, baseThrowForce);
@@ -4215,7 +4218,7 @@ export class D20Dice {
         if (anyAwake) {
             // Passing the real delta and a substep cap decouples the fall speed
             // from the display refresh rate.
-            this.world.step(1 / 60, dt, 2);
+            this.world.step(1 / 120, dt, 8);
 
             // The solver has just applied gravity to the held die and pushed it
             // back out of whatever it was resting against. Drawing that is what
